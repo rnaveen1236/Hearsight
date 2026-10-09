@@ -29,7 +29,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
-            android:text="1. Allow microphone" />
+            android:text="1. Allow microphone, contacts &amp; calls" />
 
         <Button
             android:id="@+id/btn_assistant"
@@ -42,5 +42,52 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="3. Test Sago" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            android:text="Contact nicknames"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Say the nickname, Sago calls the contact. e.g. Amma = Lakshmi" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/alias_name"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="Amma"
+                android:inputType="textPersonName" />
+
+            <EditText
+                android:id="@+id/alias_contact"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="Lakshmi"
+                android:inputType="textPersonName" />
+
+            <Button
+                android:id="@+id/alias_save"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Save" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/alias_list"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" />
     </LinearLayout>
 </ScrollView>

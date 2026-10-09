@@ -13,8 +13,20 @@ Voice assistant for Hearsight. Architecture and plan: [`../docs/SAGO_ARCHITECTUR
    ```
 4. In the Sago app: **Allow microphone** → **Set Sago as digital assistant**
    (Default apps → Digital assistant app → Sago).
-5. Long-press power (or tap **Test Sago**) and speak. Day 1 echoes back what it heard.
+5. Push a Gemma model (Day 2). Any `.task` file in the models dir works, e.g. Gemma 4 E4B or Gemma 3n E4B
+   from huggingface.co/litert-community:
+   ```bash
+   adb push gemma-3n-E4B-it-int4.task /sdcard/Android/data/com.hearsight.sago/files/models/
+   ```
+6. Long-press power (or tap **Test Sago**) and try:
+   - "What is machine learning?"
+   - "WhatsApp open pannu"
+   - "Amma-ku call pannu" (add the nickname on the setup screen first)
+   - "Volume konjam reduce pannu", "torch on pannu"
+   - "YouTube-la Anirudh songs search pannu"
 
-Logs: `adb logcat -s SagoVIS SagoSession SagoWhisper`.
+   Without a Gemma model Sago just echoes what it heard.
+
+Logs: `adb logcat -s SagoVIS SagoSession SagoWhisper SagoGemma`.
 
 Uninstall removes the app, its permissions, the assistant setting and the model.

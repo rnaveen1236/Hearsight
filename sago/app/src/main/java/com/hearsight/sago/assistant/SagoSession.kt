@@ -11,6 +11,7 @@ import android.widget.TextView
 import com.hearsight.sago.R
 import com.hearsight.sago.pipeline.SagoPipeline
 import com.hearsight.sago.pipeline.SagoPipeline.Event
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -51,9 +52,11 @@ class SagoSession(context: Context) : VoiceInteractionSession(context) {
         turn = scope.launch {
             val pipeline = SagoPipeline.get(context)
             try {
-                pipeline.runTurn(::render)
-                delay(CLOSE_DELAY_MS)
+                val result = pipeline.runTurn(::render)
+                delay(if (result.closeOverlay) 0L else CLOSE_DELAY_MS)
                 hide()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Turn failed", e)
                 render(Event.Failed(e.message ?: "Something went wrong."))

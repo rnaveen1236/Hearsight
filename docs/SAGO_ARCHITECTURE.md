@@ -32,8 +32,8 @@ No root, no flashing; uninstalling the APK removes Sago and its models completel
 │  SagoPipeline  (pipeline/)  — one turn, models kept warm between turns   │
 │                                                                          │
 │   SpeechRecorder ──▶ WhisperStt ──▶ Brain ──▶ (Action Router) ──▶ Speaker│
-│   16 kHz mic,        whisper.cpp    Gemma     Day 2              Android │
-│   energy endpoint    JNI, ta/en     Day 2                        TTS     │
+│   16 kHz mic,        whisper.cpp    GemmaBrain  router/          Android │
+│   energy endpoint    JNI, ta/en     (MediaPipe) Day 2            TTS     │
 │   (audio/)           (stt/, cpp/)   (brain/)                     (tts/)  │
 └──────────────────────────────────────┬───────────────────────────────────┘
                                        │ BrainResult
@@ -84,7 +84,7 @@ No root, no flashing; uninstalling the APK removes Sago and its models completel
 | Recorder + whisper.cpp JNI | "Amma-ku call pannu" appears as text |
 | Android TTS | Sago speaks the reply (Day 1: echoes what you said) |
 
-### Day 2 — Gemma + actions
+### Day 2 — Gemma + actions  ✅ code in this branch
 | Task | Done when |
 |---|---|
 | `GemmaBrain` (MediaPipe LLM Inference) replacing `EchoBrain`; JSON `ACTION`/`ANSWER` prompt | "What is machine learning?" is answered |
@@ -92,6 +92,12 @@ No root, no flashing; uninstalling the APK removes Sago and its models completel
 | `InstalledAppRegistry` + `OPEN_APP` | "WhatsApp open pannu", and a freshly installed app, both open |
 | `CALL_CONTACT` + alias map | "Amma-ku call pannu" dials |
 | Volume / mute / torch | All work by voice |
+
+Day 2 notes:
+- Push any Gemma `.task` file into the models dir; the largest one is used. Until one is present Sago keeps echoing.
+- `APP_SEARCH` uses `ACTION_SEARCH`, then known deep links (YouTube, Spotify), then just opens the app.
+  Tapping the first result is Day 3 (Accessibility).
+- Nicknames (Amma → Lakshmi) are set on the setup screen.
 
 ### Day 3 — wake word, media, YouTube, testing
 | Task | Done when |
