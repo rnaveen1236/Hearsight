@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Sago</string>
+    <string name="status_listening">Listening…</string>
+    <string name="status_thinking">Thinking…</string>
+    <string name="status_ready">Sago here.</string>
+</resources>

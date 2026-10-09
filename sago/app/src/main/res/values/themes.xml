@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.Sago" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>

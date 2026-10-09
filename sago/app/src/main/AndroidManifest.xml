@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_sago"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Sago">
+
+        <!-- Setup screen: permissions + "make Sago the default assistant". -->
+        <activity
+            android:name=".ui.SetupActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The system assistant. Android binds this once Sago is the default digital assistant. -->
+        <service
+            android:name=".assistant.SagoVoiceInteractionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/sago_interaction_service" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+
+        <!-- Creates a SagoSession each time the assistant is invoked (long-press power, wake word). -->
+        <service
+            android:name=".assistant.SagoSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+        <!-- Android only lists an assistant in Default apps if it also ships a RecognitionService. -->
+        <service
+            android:name=".assistant.SagoRecognitionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_SPEECH_RECOGNITION_SERVICE">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/sago_recognition_service" />
+        </service>
+    </application>
+</manifest>
