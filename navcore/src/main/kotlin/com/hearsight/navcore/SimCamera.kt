@@ -18,6 +18,8 @@ data class Scene(
     val stepDepth: Double = 0.2,
     val walkSpeed: Double = 0.0,       // metres per frame; loops back after loopAt
     val loopAt: Double = 6.0,
+    val imu: Boolean = false,          // provide a gravity "up" vector like a D435i / D455
+    val imuErrorDeg: Double = 0.0,     // IMU-to-depth misalignment, tilted about the camera x axis
 )
 
 /** Ray-cast synthetic depth camera, for tests and the app's demo mode (no RealSense needed). */
@@ -81,7 +83,14 @@ class SimCamera(
             }
             if (t.isFinite()) depth[v * width + u] = (t * (1 + noise * rnd.nextGaussian())).toFloat()
         }
-        return DepthImage(width, height, depth, f.toFloat(), f.toFloat(), (width / 2.0).toFloat(), (height / 2.0).toFloat())
+        // World up (0,0,1) in camera coordinates, optionally tilted by the IMU error.
+        val gravity = if (s.imu) {
+            val e = th + Math.toRadians(s.imuErrorDeg)
+            doubleArrayOf(0.0, -cos(e), -sin(e))
+        } else null
+        return DepthImage(
+            width, height, depth, f.toFloat(), f.toFloat(), (width / 2.0).toFloat(), (height / 2.0).toFloat(), gravity,
+        )
     }
 
     private fun rayBox(ox: Double, oy: Double, oz: Double, dx: Double, dy: Double, dz: Double, b: Box): Double? {

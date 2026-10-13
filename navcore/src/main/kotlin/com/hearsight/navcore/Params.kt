@@ -21,6 +21,14 @@ data class Params(
     val planeJumpHeight: Double = 0.2,
     val planeJumpFrames: Int = 5,        // ...and are only accepted after persisting this many frames
 
+    // --- IMU gravity (D435i / D455) ---
+    val imuMaxDeviationDeg: Double = 5.0, // floor fit may correct the IMU "up" by at most this much
+    val imuMinInlierRatio: Double = 0.03, // tilt is known, so less visible floor is enough
+    val gravityMinNorm: Double = 7.8,    // accelerometer samples outside this range (m/s^2)
+    val gravityMaxNorm: Double = 11.8,   // are walking jolts, not gravity: ignored
+    val gravityAlpha: Double = 0.05,     // low-pass filter on the gravity direction
+    val gravityMinSamples: Int = 10,
+
     // --- occupancy grid (ground-aligned, egocentric) ---
     val cell: Float = 0.10f,
     val rangeFwd: Float = 5.0f,

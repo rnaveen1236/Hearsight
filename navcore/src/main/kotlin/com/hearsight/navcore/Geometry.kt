@@ -18,6 +18,8 @@ class DepthImage(
     val fy: Float,
     val cx: Float,
     val cy: Float,
+    /** Unit "up" vector in the camera frame from the camera's IMU, if it has one. */
+    val gravityUp: DoubleArray? = null,
 )
 
 /** Packed xyz points: point i is (xyz[3i], xyz[3i+1], xyz[3i+2]). */
@@ -71,13 +73,19 @@ fun deproject(img: DepthImage, p: Params): PointCloud {
  * region has no floor (e.g. something right in front).
  */
 fun fitGroundPlane(pts: PointCloud, p: Params, prior: Plane?, rnd: Random = Random(0)): Plane? {
-    if (pts.size >= 200) {
-        val zs = FloatArray(pts.size) { pts.z(it) }.also { it.sort() }
-        val zCut = zs[(p.nearQuantile * (pts.size - 1)).toInt()]
-        val near = ransac(pts.subset { pts.z(it) <= zCut }, p, prior, rnd)
+    nearSubset(pts, p)?.let { nearPts ->
+        val near = ransac(nearPts, p, prior, rnd)
         if (near != null && near !== prior) return near
     }
     return ransac(pts, p, prior, rnd)
+}
+
+/** The nearest [Params.nearQuantile] of the points, or null if there are too few points. */
+internal fun nearSubset(pts: PointCloud, p: Params): PointCloud? {
+    if (pts.size < 200) return null
+    val zs = FloatArray(pts.size) { pts.z(it) }.also { it.sort() }
+    val zCut = zs[(p.nearQuantile * (pts.size - 1)).toInt()]
+    return pts.subset { pts.z(it) <= zCut }
 }
 
 private fun ransac(pts: PointCloud, p: Params, prior: Plane?, rnd: Random): Plane? {
@@ -132,7 +140,7 @@ private fun oriented(nx: Double, ny: Double, nz: Double, px: Double, py: Double,
 }
 
 /** Least-squares plane through the inliers (smallest eigenvector of their covariance). */
-private fun refine(pts: PointCloud, plane: Plane, thresh: Double): Plane? {
+internal fun refine(pts: PointCloud, plane: Plane, thresh: Double): Plane? {
     var n = 0
     var mx = 0.0; var my = 0.0; var mz = 0.0
     for (i in 0 until pts.size) if (abs(plane.height(pts.x(i), pts.y(i), pts.z(i))) < thresh) {

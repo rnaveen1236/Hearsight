@@ -4,9 +4,12 @@ import android.content.Context
 import android.util.Log
 import com.hearsight.navcore.DepthImage
 import com.hearsight.navcore.DepthSource
+import com.hearsight.navcore.GravityFilter
 import com.intel.realsense.librealsense.Config
 import com.intel.realsense.librealsense.DeviceListener
 import com.intel.realsense.librealsense.Extension
+import com.intel.realsense.librealsense.Frame
+import com.intel.realsense.librealsense.FrameSet
 import com.intel.realsense.librealsense.Pipeline
 import com.intel.realsense.librealsense.RsContext
 import com.intel.realsense.librealsense.StreamFormat
@@ -29,6 +32,10 @@ object Cameras {
  *
  * 424x240 depth @ 30 fps fits in USB 2.0 bandwidth too, so it works even on phones (or
  * cables) without USB 3. No colour stream: the pipeline only needs depth.
+ *
+ * On cameras with an IMU (D435i, D455) the accelerometer stream is enabled too and filtered
+ * into a gravity "up" vector attached to each depth frame, so the floor's tilt is known.
+ * librealsense reports IMU data in the depth camera's axes (x right, y down, z forward).
  */
 class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> Unit) : DepthSource {
     companion object {
@@ -46,6 +53,15 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
     var intrinsicsSource = "unknown"
         private set
 
+    private val gravity = GravityFilter()
+    private var imuEnabled = false
+    /** For the status line: whether the IMU is streaming and its current up vector. */
+    val imuStatus: String
+        get() = when {
+            !imuEnabled -> "no IMU"
+            else -> gravity.up()?.let { "IMU up (%.2f, %.2f, %.2f)".format(it[0], it[1], it[2]) } ?: "IMU settling"
+        }
+
     init {
         RsContext.init(context.applicationContext)
         rsContext = RsContext()
@@ -58,36 +74,97 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
     fun isConnected(): Boolean = rsContext.queryDevices().use { it.deviceCount > 0 }
 
     override fun start() {
-        val pipe = Pipeline()
-        Config().use { cfg ->
-            cfg.enableStream(StreamType.DEPTH, -1, WIDTH, HEIGHT, StreamFormat.Z16, FPS)
-            pipe.start(cfg).close()
-        }
-        pipeline = pipe
+        gravity.reset()
         intrinsics = null
+        // Try depth + accelerometer; cameras without an IMU (plain D435) refuse that config.
+        pipeline = try {
+            startPipeline(withImu = true).also { imuEnabled = true }
+        } catch (t: Throwable) {
+            Log.i(TAG, "No accelerometer stream, depth only: ${t.message}")
+            imuEnabled = false
+            startPipeline(withImu = false)
+        }
+    }
+
+    private fun startPipeline(withImu: Boolean): Pipeline {
+        val pipe = Pipeline()
+        try {
+            Config().use { cfg ->
+                cfg.enableStream(StreamType.DEPTH, -1, WIDTH, HEIGHT, StreamFormat.Z16, FPS)
+                if (withImu) {
+                    // Looked up by name so this still builds against wrapper versions without them.
+                    cfg.enableStream(
+                        StreamType.valueOf("ACCEL"), -1, 0, 0, StreamFormat.valueOf("MOTION_XYZ32F"), 0,
+                    )
+                }
+                pipe.start(cfg).close()
+            }
+        } catch (t: Throwable) {
+            pipe.close()
+            throw t
+        }
+        return pipe
     }
 
     override fun read(): DepthImage? {
         val pipe = pipeline ?: return null
-        pipe.waitForFrames(1000).use { frames ->
-            frames.first(StreamType.DEPTH).use { frame ->
-                // `as` wraps the same native frame; only the original is closed.
-                val video: VideoFrame = frame.`as`(Extension.VIDEO_FRAME)
-                val w = video.width
-                val h = video.height
-                val strideBytes = video.stride
-                if (raw.size != strideBytes * h) raw = ByteArray(strideBytes * h)
-                video.getData(raw)
-
-                val shorts = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                val rowShorts = strideBytes / 2
-                val depth = FloatArray(w * h)
-                for (v in 0 until h) for (u in 0 until w) {
-                    depth[v * w + u] = (shorts.get(v * rowShorts + u).toInt() and 0xFFFF) * DEPTH_UNITS
-                }
-                val k = intrinsics ?: readIntrinsics(frame, w, h).also { intrinsics = it }
-                return DepthImage(w, h, depth, k[0], k[1], k[2], k[3])
+        // Motion frames arrive in their own framesets at 63-250 Hz: keep reading, feeding the
+        // gravity filter, until a depth frame arrives.
+        val deadline = System.nanoTime() + 1_000_000_000L
+        while (System.nanoTime() < deadline) {
+            pipe.waitForFrames(1000).use { frames ->
+                if (imuEnabled) firstOrNull(frames, StreamType.valueOf("ACCEL"))?.use { readAccel(it) }
+                firstOrNull(frames, StreamType.DEPTH)?.use { return toDepthImage(it) }
             }
+        }
+        return null
+    }
+
+    /** Depending on the wrapper version, first() returns null or throws when a stream is missing. */
+    private fun firstOrNull(frames: FrameSet, type: StreamType): Frame? =
+        try { frames.first(type) } catch (_: Exception) { null }
+
+    private fun toDepthImage(frame: Frame): DepthImage {
+        // `as` wraps the same native frame; only the original is closed.
+        val video: VideoFrame = frame.`as`(Extension.VIDEO_FRAME)
+        val w = video.width
+        val h = video.height
+        val strideBytes = video.stride
+        if (raw.size != strideBytes * h) raw = ByteArray(strideBytes * h)
+        video.getData(raw)
+
+        val shorts = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        val rowShorts = strideBytes / 2
+        val depth = FloatArray(w * h)
+        for (v in 0 until h) for (u in 0 until w) {
+            depth[v * w + u] = (shorts.get(v * rowShorts + u).toInt() and 0xFFFF) * DEPTH_UNITS
+        }
+        val k = intrinsics ?: readIntrinsics(frame, w, h).also { intrinsics = it }
+        return DepthImage(w, h, depth, k[0], k[1], k[2], k[3], gravity.up())
+    }
+
+    /**
+     * Feeds one accelerometer sample to the gravity filter. Uses reflection because the
+     * wrapper's motion-frame API (MotionFrame.getMotionData() -> Float3) varies by version.
+     */
+    private fun readAccel(frame: Frame) {
+        try {
+            val ext = Extension.valueOf("MOTION_FRAME")
+            val motion: Frame = frame.`as`(ext)
+            val data = motion.javaClass.getMethod("getMotionData").invoke(motion) ?: return
+            fun component(name: String): Double {
+                val cls = data.javaClass
+                val value = try {
+                    cls.getField(name).get(data)
+                } catch (_: NoSuchFieldException) {
+                    cls.getMethod("get" + name.uppercase()).invoke(data)
+                }
+                return (value as Number).toDouble()
+            }
+            gravity.add(component("x"), component("y"), component("z"))
+        } catch (t: Throwable) {
+            Log.w(TAG, "Can't read accelerometer, continuing without IMU", t)
+            imuEnabled = false
         }
     }
 

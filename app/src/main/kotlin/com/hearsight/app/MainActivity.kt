@@ -100,6 +100,8 @@ class MainActivity : Activity() {
             stepDownAt = 7.5,
             walkSpeed = 0.03,
             loopAt = 6.0,
+            imu = true,
+            imuErrorDeg = 1.0,
         ),
         noise = 0.01,
         frameDelayMs = 66,
@@ -140,6 +142,8 @@ class MainActivity : Activity() {
         statusText.text = buildString {
             append("%.0f fps · %.0f ms/frame".format(fps, r.millis))
             if (pl != null) append(" · cam %.2f m, pitch %.0f°".format(pl.cameraHeight, pl.pitchDeg))
+            append(" · floor: ${r.floorSource.name.lowercase()}")
+            if (!demoSwitch.isChecked) append(" · ${camera.imuStatus}")
             append(" · steer %+.0f°".format(c.angleDeg))
         }
     }
