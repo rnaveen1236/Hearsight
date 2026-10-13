@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Builds Intel's librealsense Android wrapper (AAR) from source and copies it to
-# app/libs/librealsense.aar, which enables the RealSense camera in the HearSight app.
+# app/libs/librealsense.aar, which the HearSight app needs for the RealSense camera.
 #
 # Requirements (install from Android Studio > SDK Manager > SDK Tools):
 #   - Android SDK, NDK (side by side) and CMake
-#   - JDK 17, git
+#   - JDK 17 (or 11 for older librealsense releases), git, curl, unzip
 #   - ANDROID_HOME (or ANDROID_SDK_ROOT) pointing at the SDK
 #
 # Usage: scripts/build_librealsense_aar.sh [librealsense-git-tag]   (default v2.55.1)
@@ -26,8 +26,28 @@ fi
 
 cd "$WORK/wrappers/android"
 echo "sdk.dir=$SDK" > local.properties
-chmod +x gradlew
-./gradlew assembleRelease
+echo "== librealsense Android wrapper build files =="
+grep -rhE "com.android.tools.build:gradle|ndkVersion|compileSdk|distributionUrl" \
+  build.gradle */build.gradle gradle/wrapper/gradle-wrapper.properties 2>/dev/null || true
+
+# Intel's repository doesn't include gradle-wrapper.jar, so ./gradlew can't start.
+# Download the Gradle version the wrapper asks for and run it directly instead.
+if [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+  GRADLE=./gradlew
+  chmod +x gradlew
+else
+  URL="$(grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties | cut -d= -f2- | sed 's#\\:#:#g')"
+  DIST="$WORK/gradle-dist"
+  if [ ! -d "$DIST" ]; then
+    echo "Downloading $URL"
+    mkdir -p "$DIST"
+    curl -fsSL "$URL" -o "$DIST/gradle.zip"
+    unzip -q "$DIST/gradle.zip" -d "$DIST"
+  fi
+  GRADLE="$(ls -d "$DIST"/gradle-*/bin/gradle | head -n 1)"
+fi
+echo "Using $GRADLE with JAVA_HOME=${JAVA_HOME:-system java}"
+"$GRADLE" --no-daemon assembleRelease
 
 AAR="$(find . -path '*build/outputs/aar/*release*.aar' | head -n 1)"
 if [ -z "$AAR" ]; then

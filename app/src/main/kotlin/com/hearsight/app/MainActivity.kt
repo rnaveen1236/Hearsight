@@ -15,8 +15,8 @@ import com.hearsight.navcore.Command
 import com.hearsight.navcore.StepResult
 
 /**
- * Controls and live view. Guidance itself runs in [NavigationService] / [NavController], so it
- * keeps going with the screen off or this activity closed.
+ * Controls and live view. Guidance itself runs in [NavigationService] / [NavController] on the
+ * live RealSense feed, so it keeps going with the screen off or this activity closed.
  */
 class MainActivity : Activity(), NavController.Listener {
     private lateinit var commandText: TextView
@@ -24,7 +24,6 @@ class MainActivity : Activity(), NavController.Listener {
     private lateinit var statusText: TextView
     private lateinit var map: MapView
     private lateinit var startButton: Button
-    private lateinit var demoSwitch: Switch
     private lateinit var outdoorSwitch: Switch
 
     @Volatile private var uiPending = false
@@ -41,7 +40,6 @@ class MainActivity : Activity(), NavController.Listener {
         statusText = findViewById(R.id.status)
         map = findViewById(R.id.map)
         startButton = findViewById(R.id.start)
-        demoSwitch = findViewById(R.id.demo)
         outdoorSwitch = findViewById(R.id.outdoor)
 
         val feedback = NavController.feedback
@@ -57,8 +55,6 @@ class MainActivity : Activity(), NavController.Listener {
             isChecked = feedback.beeps
             setOnCheckedChangeListener { _, on -> feedback.beeps = on }
         }
-        if (!Cameras.AVAILABLE) demoSwitch.isChecked = true
-
         startButton.setOnClickListener { if (NavController.isRunning) stopGuidance() else startGuidance() }
 
         // The ongoing notification (with its Stop button) needs this on Android 13+.
@@ -81,12 +77,11 @@ class MainActivity : Activity(), NavController.Listener {
     }
 
     private fun startGuidance() {
-        val demo = demoSwitch.isChecked
-        if (!demo && !NavController.camera.isConnected()) {
+        if (!NavController.camera.isConnected()) {
             NavController.report("No camera. Plug in the RealSense.")
             return
         }
-        NavigationService.start(this, demo, outdoorSwitch.isChecked)
+        NavigationService.start(this, outdoorSwitch.isChecked)
     }
 
     private fun stopGuidance() {
@@ -115,10 +110,8 @@ class MainActivity : Activity(), NavController.Listener {
         startButton.setText(if (running) R.string.stop else R.string.start)
         startButton.backgroundTintList =
             ColorStateList.valueOf(if (running) Color.rgb(239, 68, 68) else Color.rgb(34, 197, 94))
-        demoSwitch.isEnabled = !running
         outdoorSwitch.isEnabled = !running
         if (running) {
-            demoSwitch.isChecked = NavController.demo
             outdoorSwitch.isChecked = NavController.outdoor
         } else {
             commandText.text = "READY"
@@ -146,14 +139,14 @@ class MainActivity : Activity(), NavController.Listener {
         if (c.say != null) detailText.text = c.say
         map.show(r)
         val pl = r.plane
-        val demo = NavController.demo
         statusText.text = buildString {
             append("%.0f fps · %.0f ms/frame".format(fps, r.millis))
+            NavController.latencyMs?.let { append(" · latency %.0f ms".format(it)) }
+            NavController.camera.skippedFrames.takeIf { it > 0 }?.let { append(" · skipped $it stale") }
             if (pl != null) append(" · cam %.2f m, pitch %.0f°".format(pl.cameraHeight, pl.pitchDeg))
             append(" · floor: ${r.floorSource.name.lowercase()}")
             append(
                 when {
-                    demo -> " · labels: simulated"
                     NavController.segmenter == null -> " · no segmentation model"
                     !NavController.outdoor -> " · indoor (no segmentation)"
                     else -> " · seg %.0f ms".format(NavController.segMillis)
@@ -163,7 +156,7 @@ class MainActivity : Activity(), NavController.Listener {
                 append(" · odom ${it.tracking.name.lowercase()}, heading %+.0f°, %.1f m".format(it.headingDeg, it.distance))
                 it.stepSpeed?.let { v -> append(" · steps %.1f m/s (step %.2f m)".format(v, it.stepLength ?: 0.0)) }
             }
-            if (!demo) append(" · ${NavController.camera.imuStatus}")
+            append(" · ${NavController.camera.imuStatus}")
             append(" · steer %+.0f°".format(c.angleDeg))
         }
     }
@@ -171,7 +164,6 @@ class MainActivity : Activity(), NavController.Listener {
     private fun cameraStatus(): String {
         val camera = NavController.camera
         return when {
-            !Cameras.AVAILABLE -> "Built without librealsense: demo mode only (see README)."
             camera.isConnected() -> {
                 val name = camera.deviceName() ?: "RealSense"
                 if (name.contains("D455")) "$name connected."

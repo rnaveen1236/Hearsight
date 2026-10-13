@@ -38,7 +38,8 @@ data class Scene(
 )
 
 /**
- * Ray-cast synthetic depth camera, for tests and the app's demo mode (no RealSense needed).
+ * Ray-cast synthetic depth camera for unit tests only: the app itself always runs on the live
+ * RealSense feed.
  * Defaults mimic a RealSense D455 at 424x240 with stride 2: 87 degree horizontal FOV.
  * The camera walks along its heading and can turn; [truePose] gives the ground truth.
  */

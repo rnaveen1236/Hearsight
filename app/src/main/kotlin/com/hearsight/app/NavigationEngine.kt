@@ -24,6 +24,13 @@ class NavigationEngine(
     /** Duration of the last segmentation, ms (0 if none yet). */
     @Volatile var segMillis = 0.0
         private set
+    /**
+     * Capture-to-cue latency of the last frame, ms: from the camera's frame timestamp (the
+     * D455 stamps frames in host time by default) to the end of processing. Null if the
+     * timestamps aren't in host time.
+     */
+    @Volatile var latencyMs: Double? = null
+        private set
     private val pipeline = Pipeline()
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -72,6 +79,7 @@ class NavigationEngine(
                 }
                 missed = 0
                 val result = pipeline.step(img)
+                latencyMs = img.timestampMs?.let { System.currentTimeMillis() - it }?.takeIf { it in 0.0..10_000.0 }
                 segment(img.rgb, img.width, img.height, result.frameId)
                 onResult(result)
             }

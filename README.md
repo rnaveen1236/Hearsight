@@ -39,10 +39,9 @@ an obstacle/cost map, human-centred path planning and turn-by-turn haptic guidan
 
 | Path | What it is |
 |---|---|
-| `navcore/` | The whole navigation pipeline in pure Kotlin (no Android dependencies), with unit tests and a ray-cast depth camera simulator |
-| `app/` | Android app: RealSense over USB, navigation thread, haptics/audio/speech, live map |
-| `app/src/realsense/` | Camera code, compiled only when `app/libs/librealsense.aar` exists |
-| `app/src/norealsense/` | Stub used without the AAR, so the app still builds and runs in demo mode |
+| `navcore/` | The whole navigation pipeline in pure Kotlin (no Android dependencies). Its unit tests use a ray-cast depth simulator; the app never does |
+| `app/` | Android app: live RealSense over USB, navigation thread, haptics/audio/speech, live map |
+| `app/src/realsense/` | The RealSense camera code (needs `app/libs/librealsense.aar`) |
 | `scripts/build_librealsense_aar.sh` | Builds Intel's Android wrapper from source |
 | `scripts/export_segmentation_model.py` | Exports the segmentation model to `app/src/main/assets/segmentation.onnx` |
 
@@ -81,21 +80,22 @@ To install it:
 
 ## Build and run
 
+HearSight runs **only on the live RealSense feed**: there is no simulated or demo mode,
+so the app needs Intel's librealsense library to build.
+
 1. **Open the project** in Android Studio (open the repository root, not `app/`).
-2. **Demo mode first:** run the `app` configuration on the phone. Without the RealSense
-   library the app starts in demo mode: a simulated camera walks through a corridor with
-   boxes and a step down. Use this to check the map, vibration, beeps and speech.
-3. **Enable the camera:** build Intel's Android wrapper once:
+2. **Build the camera library:** build Intel's Android wrapper once:
    ```bash
    export ANDROID_HOME=~/Android/Sdk          # macOS: ~/Library/Android/sdk
    scripts/build_librealsense_aar.sh           # clones librealsense v2.55.1, builds the AAR
    ```
    Install the **NDK** and **CMake** first (Android Studio → Settings → Android SDK →
    SDK Tools). The script copies the result to `app/libs/librealsense.aar`. Sync Gradle
-   and run again; the app now uses the camera. If Intel's wrapper doesn't build with the
+   and run the `app` configuration on the phone. Without the library, the build stops
+   with a message pointing here. If Intel's wrapper doesn't build with the
    default tag, try another release tag as the first argument and see
    `doc/android.md` in the librealsense repository.
-4. **Add the segmentation model (for outdoor use).** On a laptop with internet:
+3. **Add the segmentation model (for outdoor use).** On a laptop with internet:
    ```bash
    python -m venv .venv && . .venv/bin/activate
    pip install torch transformers onnx onnxruntime onnxscript
@@ -105,7 +105,7 @@ To install it:
    Face, exports it to `app/src/main/assets/segmentation.onnx` and checks the ONNX output
    against PyTorch. Rebuild the app. Without the file the app works the same, just
    without road and person detection.
-5. **Plug in the camera.** Android asks to open HearSight for the RealSense: tick
+4. **Plug in the camera.** Android asks to open HearSight for the RealSense: tick
    *"Always open"*. Switch on **Outdoor** when you're outside, then press **Start
    guidance**.
 
@@ -251,6 +251,18 @@ The whole pipeline (floor, odometry, fused map, planning, guidance) takes about 
 frame on a desktop JVM at 424x240. Expect roughly 30–50 ms on a recent phone, with
 segmentation running alongside on two other cores.
 
+### Real time on the live feed
+
+- **Latency:** each depth frame carries the D455's capture timestamp, in host time by
+  default. The status line shows **latency**, from capture to cue, for every frame.
+- **Dropping stale frames:** if processing falls behind, a frame that waited in the queue
+  more than about two frame periods beyond the usual USB delay is skipped for the newer
+  one behind it. Guidance always reflects what the camera sees now, not a backlog.
+  Skipped frames lose nothing: their IMU samples are still read, and the gyro rotation
+  keeps accumulating.
+- **Camera loss:** if no frame arrives for 1 s, the user hears "Camera lost. Stop."
+  and feels a long vibration.
+
 ### D455 specifics
 
 | | D455 | What the app does with it |
@@ -283,8 +295,11 @@ All thresholds are in `navcore/src/main/kotlin/com/hearsight/navcore/Params.kt`:
 
 ## 3-day plan
 
-- **Day 1:** build and run demo mode; build the AAR; get live camera frames with the
-  map showing the floor (check the camera height and pitch in the status line).
+- **Day 1:** build the AAR and the app; get live camera frames with the map showing the
+  floor (check the camera height and pitch in the status line). Check `latency` in the
+  status line: capture-to-cue time should stay under about 100 ms. If `skipped … stale`
+  keeps climbing, the phone can't keep up with 30 fps, and the app is dropping old
+  frames to stay real time.
   On a D435i or D455, hold the camera level and still. The status line should show
   `floor: imu` and `IMU up (0.00, -1.00, 0.00)` give or take a few hundredths. Tilt
   it down and the third number should go negative. If the numbers look different,
@@ -332,7 +347,7 @@ never rely on it instead of a cane or guide dog.
   - There's no crosswalk class: a crossing is "road".
   - It can't judge traffic or signals.
   - **Never use this to decide when to cross a road.**
-- There is no destination: it follows the open space ahead, like the demo.
+- There is no destination: it follows the open space ahead.
 
 ## Next steps
 

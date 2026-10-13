@@ -22,16 +22,14 @@ class NavigationService : Service() {
     companion object {
         private const val ACTION_START = "com.hearsight.app.action.START"
         private const val ACTION_STOP = "com.hearsight.app.action.STOP"
-        private const val EXTRA_DEMO = "demo"
         private const val EXTRA_OUTDOOR = "outdoor"
         private const val CHANNEL = "guidance"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "NavigationService"
 
-        fun start(context: Context, demo: Boolean, outdoor: Boolean) {
+        fun start(context: Context, outdoor: Boolean) {
             val intent = Intent(context, NavigationService::class.java)
                 .setAction(ACTION_START)
-                .putExtra(EXTRA_DEMO, demo)
                 .putExtra(EXTRA_OUTDOOR, outdoor)
             context.startForegroundService(intent)
         }
@@ -48,12 +46,11 @@ class NavigationService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val demo = intent.getBooleanExtra(EXTRA_DEMO, false)
                 val outdoor = intent.getBooleanExtra(EXTRA_OUTDOOR, false)
                 NavController.init(this)
                 // Must be in the foreground within a few seconds of startForegroundService().
-                goForeground(demo)
-                val error = NavController.start(demo, outdoor)
+                goForeground()
+                val error = NavController.start(outdoor)
                 if (error != null) {
                     NavController.report(error)
                     shutdown()
@@ -80,32 +77,23 @@ class NavigationService : Service() {
         stopSelf()
     }
 
-    private fun goForeground(demo: Boolean) {
-        val notification = buildNotification(demo)
+    private fun goForeground() {
+        val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // The camera is a connected USB device. Demo mode has none, which Android 14+
-            // rejects for that type, so it is declared as a special use instead.
-            val type = if (demo && Build.VERSION.SDK_INT >= 34) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            }
+            // The RealSense is a connected USB device; Android 14+ accepts this type once the
+            // app holds USB permission for it (granted when the camera was plugged in).
             try {
-                startForeground(NOTIFICATION_ID, notification, type)
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             } catch (e: Exception) {
-                Log.w(TAG, "Foreground type $type refused, retrying as special use", e)
-                if (Build.VERSION.SDK_INT >= 34) {
-                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-                } else {
-                    throw e
-                }
+                Log.e(TAG, "Can't start guidance in the foreground", e)
+                throw e
             }
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
-    private fun buildNotification(demo: Boolean): Notification {
+    private fun buildNotification(): Notification {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "Guidance", NotificationManager.IMPORTANCE_LOW).apply {
@@ -121,7 +109,7 @@ class NavigationService : Service() {
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentTitle("HearSight is guiding")
-            .setContentText(if (demo) "Demo mode (simulated camera)" else "Works with the screen off. Tap Stop to end.")
+            .setContentText("Live RealSense guidance. Works with the screen off. Tap Stop to end.")
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())

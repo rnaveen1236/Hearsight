@@ -6,7 +6,6 @@
     <!-- Guidance keeps running with the screen off (NavigationService). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -36,11 +35,6 @@
         <service
             android:name=".NavigationService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|specialUse">
-            <!-- specialUse is only used in demo mode, where there is no USB camera. -->
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Navigation guidance for blind users, demo with a simulated camera" />
-        </service>
+            android:foregroundServiceType="connectedDevice" />
     </application>
 </manifest>

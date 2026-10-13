@@ -3,7 +3,6 @@
     <string name="app_name">HearSight</string>
     <string name="start">Start guidance</string>
     <string name="stop">Stop guidance</string>
-    <string name="demo">Demo mode (simulated camera)</string>
     <string name="vibrate">Vibrate</string>
     <string name="speech">Speech</string>
     <string name="beeps">Stereo beeps</string>

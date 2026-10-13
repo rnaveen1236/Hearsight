@@ -84,13 +84,6 @@
         android:text="@string/outdoor"
         android:textColor="#F4F4F5" />
 
-    <Switch
-        android:id="@+id/demo"
-        android:layout_width="match_parent"
-        android:layout_height="48dp"
-        android:text="@string/demo"
-        android:textColor="#F4F4F5" />
-
     <Button
         android:id="@+id/start"
         android:layout_width="match_parent"

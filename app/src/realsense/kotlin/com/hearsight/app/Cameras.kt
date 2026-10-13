@@ -21,10 +21,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.tan
 
-/** Built with librealsense.aar present: real camera support. */
+/** The live RealSense camera (the app has no other input). */
 object Cameras {
-    const val AVAILABLE = true
-
     fun realSense(context: Context, onConnection: (Boolean) -> Unit): RealSenseCamera =
         RealSenseCamera(context, onConnection)
 }
@@ -54,6 +52,12 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         const val DEPTH_UNITS = 0.001f   // D455 default: 1 mm per unit
         const val ACCEL_FPS = 63         // D455 accelerometer runs at 63 or 250 Hz; 63 is plenty
         const val GYRO_FPS = 200         // D455 gyroscope runs at 200 or 400 Hz
+        /**
+         * A depth frame more than this behind the usual transport delay when read has waited in
+         * the queue (processing fell behind): skip it for a newer one. About two frames at 30 fps.
+         */
+        const val MAX_QUEUE_DELAY_MS = 70.0
+        private const val MAX_SKIPPED = 10
         private const val TAG = "RealSense"
     }
 
@@ -175,17 +179,41 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         return pipe
     }
 
+    /** Age of the last depth frame when it was read, ms (null if timestamps aren't host time). */
+    @Volatile var lastFrameAgeMs: Double? = null
+        private set
+    /** Depth frames skipped because processing fell behind the camera. */
+    @Volatile var skippedFrames = 0L
+        private set
+    /** Lowest recent frame age: the camera-to-phone transport delay, without queueing. */
+    private var baselineAgeMs = Double.NaN
+
     override fun read(): DepthImage? {
         val pipe = pipeline ?: return null
         // Motion frames arrive in their own framesets at 63-400 Hz: keep reading, feeding the
-        // gravity filter and gyro integrator, until a depth frame arrives.
+        // gravity filter and gyro integrator, until a fresh depth frame arrives.
         val deadline = System.nanoTime() + 1_000_000_000L
+        var skipped = 0
         while (System.nanoTime() < deadline) {
             pipe.waitForFrames(1000).use { frames ->
                 if (imuEnabled) firstOrNull(frames, StreamType.valueOf("ACCEL"))?.use { readAccel(it) }
                 if (gyroEnabled) firstOrNull(frames, StreamType.valueOf("GYRO"))?.use { readGyro(it) }
-                val hasDepth = firstOrNull(frames, StreamType.DEPTH)?.also { it.close() } != null
-                if (!hasDepth) return@use
+                val depthTs = firstOrNull(frames, StreamType.DEPTH)?.use { timestamp(it) } ?: return@use
+                // Real time: if this frame waited in the queue (processing fell behind), skip it;
+                // a newer one is right behind. The gyro keeps integrating across skipped frames.
+                // D455 timestamps are host time by default; otherwise ages are meaningless.
+                val age = System.currentTimeMillis() - depthTs
+                val hostTime = age in -50.0..10_000.0
+                lastFrameAgeMs = age.takeIf { hostTime }
+                if (hostTime) {
+                    // the baseline follows the minimum, creeping up slowly if the link gets slower
+                    baselineAgeMs = if (baselineAgeMs.isNaN()) age else minOf(age, baselineAgeMs + 0.5)
+                    if (age > baselineAgeMs + MAX_QUEUE_DELAY_MS && skipped < MAX_SKIPPED) {
+                        skipped++
+                        skippedFrames++
+                        return@use
+                    }
+                }
                 if (colorEnabled) {
                     val hasColor = firstOrNull(frames, StreamType.COLOR)?.also { it.close() } != null
                     if (hasColor) aligned(frames)?.use { set ->

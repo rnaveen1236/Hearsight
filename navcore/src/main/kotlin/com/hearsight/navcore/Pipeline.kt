@@ -2,7 +2,7 @@ package com.hearsight.navcore
 
 import java.util.concurrent.ConcurrentLinkedQueue
 
-/** Anything that produces depth frames: the RealSense on the phone, or [SimCamera]. */
+/** Anything that produces depth frames: the live RealSense on the phone (tests use a simulator). */
 interface DepthSource {
     fun start()
     /** Blocks until the next frame; null if none arrived in time. */
