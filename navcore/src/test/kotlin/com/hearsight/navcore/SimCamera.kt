@@ -35,6 +35,7 @@ data class Scene(
     val stepCounter: Boolean = false,  // attach a step count, as from the accelerometer
     val stepLength: Double = 0.65,     // the simulated walker's true step length
     val fps: Double = 30.0,
+    val colour: Boolean = false,       // attach a simple shaded colour image (for visual tests)
 )
 
 /**
@@ -100,7 +101,8 @@ class SimCamera(
         val rot = rotation()
         val ox = px; val oy = py; val oz = s.height
         val depth = FloatArray(width * height)
-        val labels = if (s.semantics) ByteArray(width * height) else null
+        val labels = if (s.semantics || s.colour) ByteArray(width * height) else null
+        val rgb = if (s.colour) ByteArray(width * height * 3) else null
 
         for (v in 0 until height) for (u in 0 until width) {
             val x = (u - width / 2.0) / f
@@ -136,6 +138,19 @@ class SimCamera(
             }
             if (t.isFinite()) depth[v * width + u] = (t * (1 + noise * rnd.nextGaussian())).toFloat()
             if (labels != null) labels[v * width + u] = kind.code
+            if (rgb != null) {
+                val base = when (kind) {
+                    Surface.WALKWAY -> intArrayOf(190, 185, 175)
+                    Surface.ROAD -> intArrayOf(80, 80, 85)
+                    Surface.TERRAIN -> intArrayOf(90, 150, 70)
+                    Surface.PERSON -> intArrayOf(60, 90, 160)
+                    Surface.VEHICLE -> intArrayOf(170, 40, 40)
+                    Surface.STRUCTURE -> intArrayOf(150, 110, 80)
+                    else -> intArrayOf(170, 205, 235)
+                }
+                val shade = if (t.isFinite()) (1.0 - min(t, 8.0) / 16).toFloat() else 1f
+                for (c in 0 until 3) rgb[3 * (v * width + u) + c] = (base[c] * shade).toInt().toByte()
+            }
         }
 
         var gravity: DoubleArray? = null
@@ -156,7 +171,8 @@ class SimCamera(
         lastRotation = rot
         return DepthImage(
             width, height, depth, f.toFloat(), f.toFloat(), (width / 2.0).toFloat(), (height / 2.0).toFloat(),
-            gravity, gyro, labels?.let { SemanticImage(width, height, it) },
+            gravity, gyro, labels?.takeIf { s.semantics }?.let { SemanticImage(width, height, it) },
+            rgb = rgb,
             timestampMs = frameIndex * 1000.0 / s.fps,
             stepCount = if (s.stepCounter) (totalWalked / s.stepLength).toInt() else null,
         )

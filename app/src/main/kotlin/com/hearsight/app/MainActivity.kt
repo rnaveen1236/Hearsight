@@ -12,6 +12,7 @@ import android.widget.CheckBox
 import android.widget.Switch
 import android.widget.TextView
 import com.hearsight.navcore.Command
+import com.hearsight.navcore.DepthImage
 import com.hearsight.navcore.StepResult
 
 /**
@@ -23,6 +24,7 @@ class MainActivity : Activity(), NavController.Listener {
     private lateinit var detailText: TextView
     private lateinit var statusText: TextView
     private lateinit var map: MapView
+    private lateinit var cameraView: CameraView
     private lateinit var startButton: Button
     private lateinit var outdoorSwitch: Switch
 
@@ -39,6 +41,7 @@ class MainActivity : Activity(), NavController.Listener {
         detailText = findViewById(R.id.detail)
         statusText = findViewById(R.id.status)
         map = findViewById(R.id.map)
+        cameraView = findViewById(R.id.cameraView)
         startButton = findViewById(R.id.start)
         outdoorSwitch = findViewById(R.id.outdoor)
 
@@ -93,7 +96,8 @@ class MainActivity : Activity(), NavController.Listener {
     override fun onMessage(msg: String) = runOnUiThread { detailText.text = msg }
 
     /** Called on the navigation thread for every frame. */
-    override fun onResult(r: StepResult) {
+    override fun onResult(img: DepthImage, r: StepResult) {
+        cameraView.show(img, r)  // renders on its own thread, drops frames while busy
         val now = System.nanoTime()
         if (lastFrameAt != 0L) fps = 0.9 * fps + 0.1 * 1e9 / (now - lastFrameAt)
         lastFrameAt = now
@@ -116,6 +120,7 @@ class MainActivity : Activity(), NavController.Listener {
         } else {
             commandText.text = "READY"
             commandText.setTextColor(Color.rgb(244, 244, 245))
+            cameraView.clear()
             statusText.text = cameraStatus()
         }
     }

@@ -26,11 +26,17 @@
         android:textColor="#A1A1AA"
         android:textSize="16sp" />
 
+    <com.hearsight.app.CameraView
+        android:id="@+id/cameraView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp" />
+
     <com.hearsight.app.MapView
         android:id="@+id/map"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="8dp"
         android:layout_weight="1"
         android:contentDescription="@string/map_description" />
 

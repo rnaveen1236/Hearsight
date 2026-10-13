@@ -1,6 +1,7 @@
 package com.hearsight.app
 
 import android.util.Log
+import com.hearsight.navcore.DepthImage
 import com.hearsight.navcore.DepthSource
 import com.hearsight.navcore.Pipeline
 import com.hearsight.navcore.StepResult
@@ -15,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class NavigationEngine(
     private val source: DepthSource,
-    private val onResult: (StepResult) -> Unit,
+    private val onResult: (DepthImage, StepResult) -> Unit,
     private val onError: (String) -> Unit,
     private val segmenter: Segmenter? = null,
 ) {
@@ -81,7 +82,7 @@ class NavigationEngine(
                 val result = pipeline.step(img)
                 latencyMs = img.timestampMs?.let { System.currentTimeMillis() - it }?.takeIf { it in 0.0..10_000.0 }
                 segment(img.rgb, img.width, img.height, result.frameId)
-                onResult(result)
+                onResult(img, result)
             }
         } finally {
             try { source.stop() } catch (t: Throwable) { Log.w(TAG, "camera stop failed", t) }

@@ -1,6 +1,7 @@
 package com.hearsight.app
 
 import android.content.Context
+import com.hearsight.navcore.DepthImage
 import com.hearsight.navcore.StepResult
 import java.util.concurrent.CopyOnWriteArraySet
 
@@ -12,8 +13,8 @@ import java.util.concurrent.CopyOnWriteArraySet
  */
 object NavController {
     interface Listener {
-        /** Every processed frame (navigation thread). */
-        fun onResult(r: StepResult) {}
+        /** Every processed live frame with its result (navigation thread). */
+        fun onResult(img: DepthImage, r: StepResult) {}
         /** Started / stopped, camera plugged or unplugged, model loaded (any thread). */
         fun onStateChanged() {}
         /** Something the user should read, e.g. an error (any thread). */
@@ -73,9 +74,9 @@ object NavController {
         camera.wantColor = seg != null
         engine = NavigationEngine(
             camera,
-            onResult = { r ->
+            onResult = { img, r ->
                 feedback.update(r.cue)
-                listeners.forEach { it.onResult(r) }
+                listeners.forEach { it.onResult(img, r) }
             },
             onError = { msg ->
                 listeners.forEach { it.onMessage(msg) }

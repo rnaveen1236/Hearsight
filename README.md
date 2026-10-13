@@ -35,6 +35,35 @@ an obstacle/cost map, human-centred path planning and turn-by-turn haptic guidan
                vibration · stereo beeps · speech · live map   (app/)
 ```
 
+## What the app shows
+
+Top to bottom:
+
+1. **Command:** STRAIGHT / LEFT / RIGHT / STOP in large text, and the last spoken warning.
+2. **Live camera view:** the RealSense picture with the navigation drawn on it.
+   - Obstacles are tinted red and drop-offs magenta, judged by each pixel's height above
+     the floor.
+   - The planned path is drawn green on the floor, and hidden where it passes behind
+     something.
+   - The steering target is a purple dot. When it's on the floor just below the view,
+     it's pinned to the bottom edge.
+   - Tap to switch between colour (streamed in Outdoor mode) and colour-coded depth
+     (red = near, blue = far).
+3. **Top-down map:**
+   - floor shaded by cost; obstacles red, people yellow, vehicles orange;
+   - drop-offs magenta, road amber, grass green;
+   - the green path with the purple target, and the red trail of where you came from.
+4. **Status line:** frame rate, latency, camera height and tilt, floor source,
+   segmentation, odometry, step speed and IMU.
+
+| Colour view | Depth view |
+|---|---|
+| ![camera view, colour](docs/camera-view-colour.png) | ![camera view, depth](docs/camera-view-depth.png) |
+
+*These two frames were rendered by the unit tests from simulated input, to show the
+overlay; the app itself only shows the live camera. To regenerate them, run
+`HEARSIGHT_PREVIEW_DIR=docs ./gradlew :navcore:test --tests '*VisualizationTest*'`.*
+
 ## Project layout
 
 | Path | What it is |
