@@ -59,6 +59,26 @@ an obstacle/cost map, human-centred path planning and turn-by-turn haptic guidan
 On some OnePlus models OTG switches itself off after 10 minutes of inactivity:
 *Settings → Additional settings → OTG connection → On*.
 
+## Download a ready-made APK (no Android Studio needed)
+
+GitHub Actions builds the app on every push (`.github/workflows/android.yml`):
+
+1. It runs the `navcore` tests.
+2. It builds Intel's RealSense library (camera support).
+3. It exports the segmentation model (road and people detection).
+4. It builds the APK with whichever of steps 2 and 3 succeeded.
+
+To install it:
+
+1. Open the repository on GitHub → **Actions** → **Build APK** → the latest run.
+2. Download **hearsight-apk** under **Artifacts**. It's a zip containing
+   `hearsight-realsense+segmentation.apk`, or a reduced variant if a step failed; the
+   run summary lists what's included.
+3. Copy the APK to the phone, open it and allow installing from that source.
+4. Each build is signed with a new debug key, so uninstall the old HearSight first.
+
+**Run workflow** on the same page starts a build by hand.
+
 ## Build and run
 
 1. **Open the project** in Android Studio (open the repository root, not `app/`).
