@@ -5,6 +5,7 @@ import android.util.Log
 import com.hearsight.navcore.DepthImage
 import com.hearsight.navcore.DepthSource
 import com.hearsight.navcore.GravityFilter
+import com.hearsight.navcore.GyroIntegrator
 import com.intel.realsense.librealsense.Config
 import com.intel.realsense.librealsense.DeviceListener
 import com.intel.realsense.librealsense.Extension
@@ -34,9 +35,11 @@ object Cameras {
  * 424x240 depth @ 30 fps fits in USB 2.0 bandwidth too, so it works even on phones (or
  * cables) without USB 3. No colour stream: the pipeline only needs depth.
  *
- * On cameras with an IMU (D435i, D455) the accelerometer stream is enabled too and filtered
- * into a gravity "up" vector attached to each depth frame, so the floor's tilt is known.
- * librealsense reports IMU data in the depth camera's axes (x right, y down, z forward).
+ * On cameras with an IMU (D435i, D455) the accelerometer and gyroscope streams are enabled
+ * too. The accelerometer is filtered into a gravity "up" vector (floor tilt); the gyroscope is
+ * integrated into the rotation between depth frames (odometry prediction). Both are attached
+ * to each depth frame. librealsense reports IMU data in the depth camera's axes
+ * (x right, y down, z forward).
  */
 class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> Unit) : DepthSource {
     companion object {
@@ -45,6 +48,7 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         const val FPS = 30
         const val DEPTH_UNITS = 0.001f   // D455 default: 1 mm per unit
         const val ACCEL_FPS = 63         // D455 accelerometer runs at 63 or 250 Hz; 63 is plenty
+        const val GYRO_FPS = 200         // D455 gyroscope runs at 200 or 400 Hz
         private const val TAG = "RealSense"
     }
 
@@ -56,12 +60,15 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         private set
 
     private val gravity = GravityFilter()
+    private val gyro = GyroIntegrator()
     private var imuEnabled = false
+    private var gyroEnabled = false
     /** For the status line: whether the IMU is streaming and its current up vector. */
     val imuStatus: String
         get() = when {
             !imuEnabled -> "no IMU"
-            else -> gravity.up()?.let { "IMU up (%.2f, %.2f, %.2f)".format(it[0], it[1], it[2]) } ?: "IMU settling"
+            else -> (gravity.up()?.let { "IMU up (%.2f, %.2f, %.2f)".format(it[0], it[1], it[2]) } ?: "IMU settling") +
+                if (gyroEnabled) " + gyro" else " (no gyro)"
         }
 
     init {
@@ -96,34 +103,41 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
 
     override fun start() {
         gravity.reset()
+        gyro.reset()
         intrinsics = null
-        // Depth + accelerometer at 63 Hz, then at any rate the camera offers, then depth only
-        // (cameras without an IMU, like the plain D435, refuse the accelerometer stream).
-        for (accelFps in listOf(ACCEL_FPS, 0)) {
+        // Most to least capable: accel + gyro at the D455's rates, accel + gyro at any rate,
+        // accel only, then depth only (a plain D435 has no IMU and refuses motion streams).
+        val attempts = listOf(
+            Triple(ACCEL_FPS, GYRO_FPS, "accel 63 Hz + gyro 200 Hz"),
+            Triple(0, 0, "accel + gyro, any rate"),
+            Triple(0, null, "accel only"),
+        )
+        for ((accelFps, gyroFps, label) in attempts) {
             try {
-                pipeline = startPipeline(accelFps)
+                pipeline = startPipeline(accelFps, gyroFps)
                 imuEnabled = true
+                gyroEnabled = gyroFps != null
+                Log.i(TAG, "Streaming depth + $label")
                 return
             } catch (t: Throwable) {
-                Log.i(TAG, "Accelerometer at $accelFps Hz refused: ${t.message}")
+                Log.i(TAG, "Config '$label' refused: ${t.message}")
             }
         }
         imuEnabled = false
-        pipeline = startPipeline(null)
+        gyroEnabled = false
+        pipeline = startPipeline(null, null)
     }
 
-    /** [accelFps]: null = depth only, 0 = accelerometer at any rate. */
-    private fun startPipeline(accelFps: Int?): Pipeline {
+    /** Null fps = stream off, 0 = any rate. */
+    private fun startPipeline(accelFps: Int?, gyroFps: Int?): Pipeline {
         val pipe = Pipeline()
         try {
             Config().use { cfg ->
                 cfg.enableStream(StreamType.DEPTH, -1, WIDTH, HEIGHT, StreamFormat.Z16, FPS)
-                if (accelFps != null) {
-                    // Looked up by name so this still builds against wrapper versions without them.
-                    cfg.enableStream(
-                        StreamType.valueOf("ACCEL"), -1, 0, 0, StreamFormat.valueOf("MOTION_XYZ32F"), accelFps,
-                    )
-                }
+                // Motion types looked up by name so this builds against wrapper versions without them.
+                val motion = StreamFormat.valueOf("MOTION_XYZ32F")
+                if (accelFps != null) cfg.enableStream(StreamType.valueOf("ACCEL"), -1, 0, 0, motion, accelFps)
+                if (gyroFps != null) cfg.enableStream(StreamType.valueOf("GYRO"), -1, 0, 0, motion, gyroFps)
                 pipe.start(cfg).close()
             }
         } catch (t: Throwable) {
@@ -135,12 +149,13 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
 
     override fun read(): DepthImage? {
         val pipe = pipeline ?: return null
-        // Motion frames arrive in their own framesets at 63-250 Hz: keep reading, feeding the
-        // gravity filter, until a depth frame arrives.
+        // Motion frames arrive in their own framesets at 63-400 Hz: keep reading, feeding the
+        // gravity filter and gyro integrator, until a depth frame arrives.
         val deadline = System.nanoTime() + 1_000_000_000L
         while (System.nanoTime() < deadline) {
             pipe.waitForFrames(1000).use { frames ->
                 if (imuEnabled) firstOrNull(frames, StreamType.valueOf("ACCEL"))?.use { readAccel(it) }
+                if (gyroEnabled) firstOrNull(frames, StreamType.valueOf("GYRO"))?.use { readGyro(it) }
                 firstOrNull(frames, StreamType.DEPTH)?.use { return toDepthImage(it) }
             }
         }
@@ -167,7 +182,7 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
             depth[v * w + u] = (shorts.get(v * rowShorts + u).toInt() and 0xFFFF) * DEPTH_UNITS
         }
         val k = intrinsics ?: readIntrinsics(frame, w, h).also { intrinsics = it }
-        return DepthImage(w, h, depth, k[0], k[1], k[2], k[3], gravity.up())
+        return DepthImage(w, h, depth, k[0], k[1], k[2], k[3], gravity.up(), if (gyroEnabled) gyro.take() else null)
     }
 
     /**
@@ -176,23 +191,40 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
      */
     private fun readAccel(frame: Frame) {
         try {
-            val ext = Extension.valueOf("MOTION_FRAME")
-            val motion: Frame = frame.`as`(ext)
-            val data = motion.javaClass.getMethod("getMotionData").invoke(motion) ?: return
-            fun component(name: String): Double {
-                val cls = data.javaClass
-                val value = try {
-                    cls.getField(name).get(data)
-                } catch (_: NoSuchFieldException) {
-                    cls.getMethod("get" + name.uppercase()).invoke(data)
-                }
-                return (value as Number).toDouble()
-            }
-            gravity.add(component("x"), component("y"), component("z"))
+            val m = motionData(frame)
+            gravity.add(m[0], m[1], m[2])
         } catch (t: Throwable) {
             Log.w(TAG, "Can't read accelerometer, continuing without IMU", t)
             imuEnabled = false
         }
+    }
+
+    /** Feeds one gyroscope sample (rad/s) with its timestamp (ms) to the integrator. */
+    private fun readGyro(frame: Frame) {
+        try {
+            val m = motionData(frame)
+            val ts = (frame.javaClass.getMethod("getTimestamp").invoke(frame) as Number).toDouble()
+            gyro.add(m[0], m[1], m[2], ts)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Can't read gyroscope, continuing without it", t)
+            gyroEnabled = false
+        }
+    }
+
+    /** x, y, z of a motion frame via MotionFrame.getMotionData() -> Float3 (fields or getters). */
+    private fun motionData(frame: Frame): DoubleArray {
+        val motion: Frame = frame.`as`(Extension.valueOf("MOTION_FRAME"))
+        val data = motion.javaClass.getMethod("getMotionData").invoke(motion)!!
+        fun component(name: String): Double {
+            val cls = data.javaClass
+            val value = try {
+                cls.getField(name).get(data)
+            } catch (_: NoSuchFieldException) {
+                cls.getMethod("get" + name.uppercase()).invoke(data)
+            }
+            return (value as Number).toDouble()
+        }
+        return doubleArrayOf(component("x"), component("y"), component("z"))
     }
 
     override fun stop() {

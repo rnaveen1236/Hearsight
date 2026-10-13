@@ -20,6 +20,8 @@ class DepthImage(
     val cy: Float,
     /** Unit "up" vector in the camera frame from the camera's IMU, if it has one. */
     val gravityUp: DoubleArray? = null,
+    /** Gyro-integrated rotation since the previous frame (row-major 3x3, previous <- current). */
+    val gyroDelta: DoubleArray? = null,
 )
 
 /** Packed xyz points: point i is (xyz[3i], xyz[3i+1], xyz[3i+2]). */

@@ -16,6 +16,9 @@ an obstacle/cost map, human-centred path planning and turn-by-turn haptic guidan
    accelerometer (D435i/D455) ►│ 2. floor plane: IMU gravity gives the   (navcore/Gravity.kt)
                                │    tilt, only the height is searched;
                                │    else RANSAC, "nothing solid below the floor"
+   gyroscope (D435i/D455) ────►│ 2b. odometry: gyro predicts rotation,   (navcore/Odometry.kt)
+                               │    point-to-plane ICP refines it and
+                               │    measures movement → pose + red trail
                                │ 3. 2.5D grid: floor / obstacle /        (navcore/Grid.kt)
                                │    drop-off / unknown + safety margin
                                │ 4. Dijkstra → goal ahead → straight     (navcore/Planner.kt)
@@ -128,8 +131,28 @@ depth frames stop arriving for more than 1 second.
    the steering angle. It is smoothed, with a dead band and hysteresis, so the user isn't
    buzzed for every small wobble.
 
-The whole step takes about 7 ms per frame on a desktop JVM. Expect roughly 15–30 ms on
-a recent phone.
+6. **Odometry (where am I, which way am I facing).** Depth-inertial odometry tracks
+   the head's 6-DoF pose:
+   - **Prediction:** the gyroscope (200 Hz) is integrated between depth frames to
+     predict the rotation, plus constant velocity for the translation.
+   - **Alignment:** point-to-plane ICP aligns the frame with a keyframe. Matches are
+     found by projecting points into the keyframe's depth image, which is cheap enough
+     for a phone. Normals are taken over a 3-pixel span to beat D455 depth noise.
+   - **Gyro as a soft prior:** facing a single wall, a small turn and a sideways step
+     look alike; the prior stops ICP trading one for the other.
+   - **Degenerate directions:** any direction the geometry can't measure is flagged
+     `degenerate` and keeps the prediction instead of drifting. A bare corridor is the
+     classic case: forward motion is invisible to depth.
+   - **Sanity limits:** a frame that moves more than 12 cm, or disagrees with the gyro by
+     more than 10°, is reported `lost`, never as motion.
+   - **Keyframes:** a new one after 30 cm or 12°, which limits drift.
+
+   It outputs heading, distance walked and the red arrow trail under the user on the
+   map. In simulation: 0.1–0.6% position error and under 1° rotation error over 1.8–4 m
+   walks, and 7% position error during a fast 60°/s head turn.
+
+Floor, grid, planning and guidance take about 5 ms per frame on a desktop JVM, and
+odometry about 6 ms more. Expect roughly 20–40 ms in total on a recent phone.
 
 ### D455 specifics
 
@@ -138,7 +161,7 @@ a recent phone.
 | Depth stream | 424x240 @ 30 fps | Works over USB 2.0 too; every second pixel is used (about 25k points) |
 | Depth range | about 0.4–6 m | `minDepth` 0.4 m, `maxDepth` 6 m |
 | Depth noise | about half a D435's (95 mm vs 50 mm stereo baseline) | `noiseK` 0.006, so a 15 cm curb is seen from 2.5 m away; with D435-level noise allowance it isn't |
-| IMU | Accelerometer at 63 Hz | Gravity sets the floor tilt (see step 2 above) |
+| IMU | Accelerometer at 63 Hz, gyroscope at 200 Hz | Gravity sets the floor tilt (step 2); the gyro predicts rotation for odometry (step 6) |
 | Field of view | 87° × 58° | Used if the device intrinsics can't be read |
 
 ### Using a different camera
@@ -171,6 +194,10 @@ All thresholds are in `navcore/src/main/kotlin/com/hearsight/navcore/Params.kt`:
   the IMU axes don't match the depth camera's: fix the axis order in
   `RealSenseCamera.readAccel`. The app falls back to depth-only floor detection when
   the up vector is implausible.
+  Then check the gyroscope and odometry. Turn right on the spot: `heading` should go
+  positive, about +90° after a quarter turn. If it goes negative, the gyro axes are
+  flipped: negate them in `RealSenseCamera.readGyro`. Walk 3 m in a furnished room:
+  the status distance should read about 3 m, with the red trail behind you on the map.
 - **Day 2:** mount the camera; walk indoor corridors and around furniture; tune
   `Params` (obstacle height, body radius, dead band) until the cues feel right.
 - **Day 3:** test steps, doorways and people walking past; blindfolded trials *with a
@@ -181,9 +208,12 @@ All thresholds are in `navcore/src/main/kotlin/com/hearsight/navcore/Params.kt`:
 This is a prototype, **not a safety device**. Always test with a sighted spotter, and
 never rely on it instead of a cane or guide dog.
 
-- The map is rebuilt every frame from what the camera sees right now. There is no
-  memory of the surroundings (visual odometry or SLAM) yet, so obstacles that leave the
+- The map is rebuilt every frame from what the camera sees right now. Odometry now
+  tracks the user's pose, but the map doesn't use it yet, so obstacles that leave the
   field of view are forgotten.
+- Odometry relies on 3D structure. In a bare corridor or open hall it can't see forward
+  motion (status shows `degenerate`) and under-counts distance. Turns are still
+  tracked by the gyro. It also drifts slowly over long walks: there's no loop closure.
 - The camera can't see the ground right at the user's feet. Very low obstacles there,
   glass, mirrors and black surfaces can be missed (RealSense limits).
 - In bright sunlight the D4xx depth is noisier. Outdoor use needs more testing.
@@ -193,13 +223,18 @@ never rely on it instead of a cane or guide dog.
 
 ## Next steps
 
-1. **Use the gyroscope too.** Fusing it with the accelerometer (a complementary filter)
-   would keep the up direction accurate during fast head turns and walking.
-2. **Remember the surroundings.** Track head motion between frames (visual odometry) and
-   fuse frames into a map that persists when the camera looks away.
-3. **Recognise surfaces.** Run a TFLite segmentation model on the RealSense colour stream
+1. **Remember the surroundings.** Use the odometry pose to fuse frames into a map that
+   persists when the camera looks away (a voxel or 2.5D height map in world
+   coordinates).
+2. **Better odometry in corridors.** Add a visual term from the D455's colour or
+   infrared image (with the IR projector switched off or interleaved) so forward motion
+   is measurable when the geometry is flat. A step counter from the accelerometer would
+   help too.
+3. **Use the gyroscope for gravity too.** Fusing it with the accelerometer (a
+   complementary filter) would keep the up direction accurate during fast head turns.
+4. **Recognise surfaces.** Run a TFLite segmentation model on the RealSense colour stream
    (sidewalk / road / crosswalk / stairs) and add it as a cost layer.
-4. **Keep running with the screen off.** Move the navigation loop into a foreground
+5. **Keep running with the screen off.** Move the navigation loop into a foreground
    service.
-5. **Build a haptic headband.** An ESP32 with 3–5 vibration motors over BLE would give
+6. **Build a haptic headband.** An ESP32 with 3–5 vibration motors over BLE would give
    directional cues on the forehead, like the .lumen glasses.

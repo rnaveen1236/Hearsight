@@ -100,6 +100,7 @@ class MainActivity : Activity() {
             stepDownAt = 7.5,
             walkSpeed = 0.03,
             loopAt = 6.0,
+            yawRateDeg = 0.3,
             imu = true,
             imuErrorDeg = 1.0,
         ),
@@ -143,6 +144,9 @@ class MainActivity : Activity() {
             append("%.0f fps · %.0f ms/frame".format(fps, r.millis))
             if (pl != null) append(" · cam %.2f m, pitch %.0f°".format(pl.cameraHeight, pl.pitchDeg))
             append(" · floor: ${r.floorSource.name.lowercase()}")
+            r.odometry?.let {
+                append(" · odom ${it.tracking.name.lowercase()}, heading %+.0f°, %.1f m".format(it.headingDeg, it.distance))
+            }
             if (!demoSwitch.isChecked) append(" · ${camera.imuStatus}")
             append(" · steer %+.0f°".format(c.angleDeg))
         }

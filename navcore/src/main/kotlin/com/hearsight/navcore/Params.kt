@@ -35,6 +35,28 @@ data class Params(
     val gravityAlpha: Double = 0.05,     // low-pass filter on the gravity direction
     val gravityMinSamples: Int = 10,
 
+    // --- depth-inertial odometry ---
+    val odomStride: Int = 2,             // vertex-map resolution: depth image / stride
+    val odomSourceStep: Int = 2,         // use every n-th vertex as an ICP source point
+    val odomMaxDepth: Float = 5.0f,      // ignore noisier far points for alignment
+    val odomIters: Int = 15,
+    val odomGateStart: Double = 0.25,    // max point-to-point match distance, shrinking per iteration
+    val odomGateMin: Double = 0.05,
+    val odomHuber: Double = 0.02,        // robust-loss threshold on point-to-plane residuals
+    val odomNormalDeg: Double = 30.0,    // max normal disagreement for a match
+    val odomDegenerateRatio: Double = 0.03, // eigenvalue / inliers below this = unobservable direction
+    val odomDegenerateRatioNoGyro: Double = 0.01, // lower without a gyro: nothing else predicts rotation
+    val odomMinInliers: Int = 150,
+    val odomMinInlierRatio: Double = 0.2,
+    val odomMaxRmse: Double = 0.04,
+    val odomGyroWeight: Double = 0.2,    // strength of the gyro rotation prior, per inlier
+    val odomMaxStep: Double = 0.12,      // m per frame (3.6 m/s at 30 fps); more = failed alignment
+    val odomMaxGyroDisagreeDeg: Double = 10.0,
+    val odomKeyframeDist: Double = 0.30,
+    val odomKeyframeDeg: Double = 12.0,
+    val trailEvery: Int = 3,             // keep every n-th pose for the trail on the map
+    val trailLength: Int = 40,
+
     // --- occupancy grid (ground-aligned, egocentric) ---
     val cell: Float = 0.10f,
     val rangeFwd: Float = 5.0f,

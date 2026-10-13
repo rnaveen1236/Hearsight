@@ -12,7 +12,10 @@ import android.view.View
 import com.hearsight.navcore.Pt
 import com.hearsight.navcore.StepResult
 
-/** Top-down debug map in the style of the dotLumen demo: floor shading, obstacles, path, target. */
+/**
+ * Top-down debug map in the style of the dotLumen demo: floor shading, obstacles, path, target,
+ * and below the user a strip showing the odometry trail (where they came from, as red arrows).
+ */
 class MapView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
     @Volatile private var result: StepResult? = null
     private var bitmap: Bitmap? = null
@@ -25,6 +28,8 @@ class MapView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
     }
     private val targetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(200, 60, 200) }
     private val userPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(239, 68, 68) }
+    private val stripPaint = Paint().apply { color = Color.rgb(28, 28, 32) }
+    private val trailPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(220, 50, 50) }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.LTGRAY; textSize = 40f; textAlign = Paint.Align.CENTER }
 
     fun show(r: StepResult) {
@@ -59,9 +64,12 @@ class MapView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
         val bmp = bitmap!!
         bmp.setPixels(pixels, 0, g.cols, 0, 0, g.cols, g.rows)
 
-        val scale = minOf(width.toFloat() / g.cols, height.toFloat() / g.rows)
-        val w = g.cols * scale; val h = g.rows * scale
-        val dst = RectF((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2)
+        val behindRows = BEHIND_METRES / g.cell
+        val scale = minOf(width.toFloat() / g.cols, height.toFloat() / (g.rows + behindRows))
+        val w = g.cols * scale; val h = g.rows * scale; val hb = behindRows * scale
+        val top = (height - h - hb) / 2
+        val dst = RectF((width - w) / 2, top, (width + w) / 2, top + h)
+        canvas.drawRect(dst.left, dst.bottom, dst.right, dst.bottom + hb, stripPaint)
         canvas.drawBitmap(bmp, null, dst, bmpPaint)
 
         val range = g.rows * g.cell
@@ -69,6 +77,21 @@ class MapView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
             dst.left + ((p.lat + g.halfWidth) / (2 * g.halfWidth) * dst.width()).toFloat(),
             dst.bottom - (p.fwd / range * dst.height()).toFloat(),
         )
+
+        // Odometry trail: past positions as small arrows pointing the way the user faced.
+        for (tp in r.trail) {
+            if (tp.at.fwd < -BEHIND_METRES || tp.at.fwd > range) continue
+            val c = px(tp.at)
+            val a = Math.toRadians(tp.headingDeg)
+            val dx = Math.sin(a).toFloat(); val dy = -Math.cos(a).toFloat()  // screen: forward = up
+            val arrow = Path().apply {
+                moveTo(c[0] + 14 * dx, c[1] + 14 * dy)
+                lineTo(c[0] - 8 * dx - 7 * dy, c[1] - 8 * dy + 7 * dx)
+                lineTo(c[0] - 8 * dx + 7 * dy, c[1] - 8 * dy - 7 * dx)
+                close()
+            }
+            canvas.drawPath(arrow, trailPaint)
+        }
 
         val plan = r.plan
         if (plan.reachable) {
@@ -87,5 +110,9 @@ class MapView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
             moveTo(u[0], u[1] - 50); lineTo(u[0] - 22, u[1]); lineTo(u[0] + 22, u[1]); close()
         }
         canvas.drawPath(tri, userPaint)
+    }
+
+    private companion object {
+        const val BEHIND_METRES = 1.5f
     }
 }
