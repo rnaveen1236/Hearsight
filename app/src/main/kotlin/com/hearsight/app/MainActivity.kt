@@ -2,6 +2,7 @@ package com.hearsight.app
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -28,6 +29,8 @@ class MainActivity : Activity(), NavController.Listener {
     private lateinit var startButton: Button
     private lateinit var outdoorSwitch: Switch
 
+    /** Start was pressed while a permission dialog was open: continue once it's answered. */
+    private var startAfterPermission = false
     @Volatile private var uiPending = false
     private var fps = 0.0
     private var lastFrameAt = 0L
@@ -60,12 +63,40 @@ class MainActivity : Activity(), NavController.Listener {
         }
         startButton.setOnClickListener { if (NavController.isRunning) stopGuidance() else startGuidance() }
 
-        // The ongoing notification (with its Stop button) needs this on Android 13+.
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        requestMissingPermissions()
+    }
+
+    /**
+     * CAMERA: Android only lets apps open USB cameras like the D455 with it.
+     * POST_NOTIFICATIONS (Android 13+): the ongoing notification with its Stop button.
+     */
+    private fun requestMissingPermissions(): Boolean {
+        val wanted = buildList {
+            add(Manifest.permission.CAMERA)
+            if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+        }.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (wanted.isEmpty()) return false
+        requestPermissions(wanted.toTypedArray(), REQUEST_PERMISSIONS)
+        return true
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_PERMISSIONS) return
+        val pending = startAfterPermission
+        startAfterPermission = false
+        if (!CameraAccess.hasCameraPermission(this)) {
+            NavController.report("Camera permission is needed to use the RealSense.")
+        } else if (pending) {
+            startGuidance()
         }
+        showState()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Opened by plugging in the RealSense (USB_DEVICE_ATTACHED): Android has granted USB access.
+        showState()
     }
 
     override fun onStart() {
@@ -79,12 +110,28 @@ class MainActivity : Activity(), NavController.Listener {
         super.onStop()
     }
 
+    /** Camera permission, then the device, then USB permission, then start. */
     private fun startGuidance() {
-        if (!NavController.camera.isConnected()) {
+        if (!CameraAccess.hasCameraPermission(this)) {
+            startAfterPermission = true
+            if (!requestMissingPermissions()) startAfterPermission = false
+            return
+        }
+        val device = CameraAccess.device(this)
+        if (device == null) {
             NavController.report("No camera. Plug in the RealSense.")
             return
         }
-        NavigationService.start(this, outdoorSwitch.isChecked)
+        CameraAccess.requestUsbPermission(this, device) { granted ->
+            if (!granted) {
+                NavController.report("USB access to the RealSense was refused. Press Start to ask again.")
+            } else if (!NavController.camera.isConnected()) {
+                NavController.report("The RealSense isn't responding. Unplug it and plug it in again.")
+            } else {
+                NavigationService.start(this, outdoorSwitch.isChecked)
+            }
+            showState()
+        }
     }
 
     private fun stopGuidance() {
@@ -168,6 +215,10 @@ class MainActivity : Activity(), NavController.Listener {
 
     private fun cameraStatus(): String {
         val camera = NavController.camera
+        val access = CameraAccess.state(this)
+        if (access != CameraAccess.State.GRANTED && access != CameraAccess.State.NO_DEVICE) {
+            return "Camera access: ${access.label}. Press Start to grant it."
+        }
         return when {
             camera.isConnected() -> {
                 val name = camera.deviceName() ?: "RealSense"
@@ -176,5 +227,9 @@ class MainActivity : Activity(), NavController.Listener {
             }
             else -> "RealSense not connected. Plug it in with a USB-C OTG cable."
         }
+    }
+
+    private companion object {
+        const val REQUEST_PERMISSIONS = 1
     }
 }

@@ -80,10 +80,15 @@ class NavigationService : Service() {
     private fun goForeground() {
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // The RealSense is a connected USB device; Android 14+ accepts this type once the
-            // app holds USB permission for it (granted when the camera was plugged in).
+            // The RealSense is a USB-connected camera: "connectedDevice" (needs the USB
+            // permission) and "camera" (needs the CAMERA permission, and keeps camera access
+            // allowed with the screen off).
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && CameraAccess.hasCameraPermission(this)) {
+                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA  // type exists from Android 11
+            }
             try {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                startForeground(NOTIFICATION_ID, notification, type)
             } catch (e: Exception) {
                 Log.e(TAG, "Can't start guidance in the foreground", e)
                 throw e

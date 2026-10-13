@@ -138,6 +138,17 @@ so the app needs Intel's librealsense library to build.
    *"Always open"*. Switch on **Outdoor** when you're outside, then press **Start
    guidance**.
 
+   **Camera access:** the app asks for two grants. Both are needed and both are asked
+   for when you press **Start**:
+   - **Camera permission:** the D455 is a USB video camera, and Android (9 and later)
+     only lets apps open USB cameras with this permission.
+   - **USB permission** for the D455 itself. Ticking *"Always open HearSight"* when you
+     plug the camera in grants it permanently.
+
+   The status line shows what's missing (e.g. `Camera access: needs USB permission`).
+   If you refused the camera permission permanently, enable it in *Settings → Apps →
+   HearSight → Permissions → Camera*.
+
 Run the pipeline tests on any machine with JDK 17: `./gradlew :navcore:test` (the
 Android SDK must be installed, because Gradle configures the `app` module too).
 

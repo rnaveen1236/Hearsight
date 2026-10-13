@@ -2,10 +2,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+    <!-- The phone's own cameras aren't used; the RealSense is a USB camera. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- Android only lets apps open USB video (UVC) cameras like the D455 with CAMERA. -->
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Guidance keeps running with the screen off (NavigationService). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -35,6 +41,6 @@
         <service
             android:name=".NavigationService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="camera|connectedDevice" />
     </application>
 </manifest>
