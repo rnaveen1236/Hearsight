@@ -101,7 +101,12 @@ Android SDK must be installed, because Gradle configures the `app` module too).
 - The phone powers the D455 over USB, which drains its battery noticeably. Start with a
   full charge, or use a power bank with a USB-C hub that supports OTG plus charging.
 - Earbuds are recommended for the stereo beeps; the phone can be in a pocket or a chest
-  pouch. The screen stays on while the app is open.
+  pouch.
+- **Screen off is fine.** Guidance runs in a foreground service that holds a CPU wake
+  lock, so it keeps going with the screen off or the app in the background. A
+  notification shows while it's running; its **Stop** button ends guidance. On Android
+  13+ allow notifications when asked, or the notification and its Stop button stay
+  hidden (guidance still runs; stop it from the app).
 
 | Cue | Vibration | Beep | Meaning |
 |---|---|---|---|
@@ -119,8 +124,11 @@ depth frames stop arriving for more than 1 second.
 1. **Depth → 3D points.** Every second pixel is turned into a 3D point with the camera's
    intrinsics (about 25k points per frame).
 2. **Floor plane.**
-   - **With an IMU (D435i, D455):** the accelerometer stream is low-pass filtered into
-     an "up" direction. Samples far from 1 g are walking jolts and are skipped. The up
+   - **With an IMU (D435i, D455):** the gyroscope rotates the "up" direction with the
+     head at 200 Hz, and the accelerometer slowly corrects the gyro's drift (a
+     complementary filter). Accelerometer samples far from 1 g are walking jolts and are
+     skipped. In a simulated 20° head tilt while walking, accelerometer-only filtering
+     lags 12° behind; the fused estimate is within 0.1°. The up
      direction fixes the floor's tilt, so only its height is searched: a histogram of
      every point's distance below the camera, scored the same way as below. A
      least-squares fit can then correct the IMU by up to 5°, which absorbs small
@@ -165,6 +173,13 @@ depth frames stop arriving for more than 1 second.
    - **Sanity limits:** a frame that moves more than 12 cm, or disagrees with the gyro by
      more than 10°, is reported `lost`, never as motion.
    - **Keyframes:** a new one after 30 cm or 12°, which limits drift.
+   - **Step counter for corridors:** the accelerometer's vertical bounce counts steps.
+     Cadence × step length gives walking speed, which replaces the prediction's
+     horizontal-forward part. Depth alignment still overrides it wherever it can
+     measure; where it can't (a bare corridor), the step-based distance is used. The
+     step length starts at 0.65 m and is learned from walks where depth measured all
+     motion. In simulation a 4.5 m walk down a bare corridor measures 4.0 m with steps,
+     versus 0 m without.
 
    It outputs heading, distance walked and the red arrow trail under the user on the
    map. In simulation: 0.1–0.6% position error and under 1° rotation error over 1.8–4 m
@@ -264,6 +279,9 @@ All thresholds are in `navcore/src/main/kotlin/com/hearsight/navcore/Params.kt`:
   view, it should still be on the map beside you, red, and the path should keep clear
   of it. Have someone step in front of the camera and walk away: they should vanish
   from the map within about half a second.
+  Walk 10 steps: the status line should show `steps … m/s` and a step length that
+  settles near yours after walking in a furnished room. Turn the screen off mid-walk:
+  cues should continue, and the notification's **Stop** should end guidance.
   Outdoors, with the model added and **Outdoor** on: the status line shows `seg … ms`.
   The road shows amber on the map and people yellow, and walking towards the road edge
   says "Road ahead".
@@ -281,9 +299,11 @@ never rely on it instead of a cane or guide dog.
   remembered obstacles slightly; they fade after about 30 s. Black, glass and very shiny
   objects return no depth: the map can't see them, and an object it saw earlier fades
   if the camera later gets no return from it within 3 m.
-- Odometry relies on 3D structure. In a bare corridor or open hall it can't see forward
-  motion (status shows `degenerate`) and under-counts distance. Turns are still
-  tracked by the gyro. It also drifts slowly over long walks: there's no loop closure.
+- In a bare corridor or open hall, depth can't see forward motion (status shows
+  `degenerate`): distance then comes from the step counter. That is about 10% short in
+  simulation, and depends on the step length having been learned in a furnished
+  space first. Shuffling or very slow steps may not be counted. It also drifts slowly
+  over long walks: there's no loop closure.
 - The camera can't see the ground right at the user's feet. Very low obstacles there,
   glass, mirrors and black surfaces can be missed (RealSense limits).
 - In bright sunlight the D4xx depth is noisier. Outdoor use needs more testing.
@@ -296,15 +316,10 @@ never rely on it instead of a cane or guide dog.
 
 ## Next steps
 
-1. **Better odometry in corridors.** Add a visual term from the D455's colour or
-   infrared image (with the IR projector switched off or interleaved) so forward motion
-   is measurable when the geometry is flat. A step counter from the accelerometer would
-   help too.
-2. **Use the gyroscope for gravity too.** Fusing it with the accelerometer (a
-   complementary filter) would keep the up direction accurate during fast head turns.
-3. **Better segmentation.** Fine-tune on pedestrian-view data (e.g. Mapillary Vistas,
+1. **Visual odometry term.** Add the D455's colour or infrared image (with the IR
+   projector off or interleaved) to measure forward motion in corridors directly,
+   instead of relying on steps.
+2. **Better segmentation.** Fine-tune on pedestrian-view data (e.g. Mapillary Vistas,
    which has crosswalks and curbs) and add indoor classes so it can run everywhere.
-4. **Keep running with the screen off.** Move the navigation loop into a foreground
-   service.
-5. **Build a haptic headband.** An ESP32 with 3–5 vibration motors over BLE would give
+3. **Build a haptic headband.** An ESP32 with 3–5 vibration motors over BLE would give
    directional cues on the forehead, like the .lumen glasses.

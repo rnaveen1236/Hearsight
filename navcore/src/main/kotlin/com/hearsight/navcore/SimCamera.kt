@@ -32,6 +32,9 @@ data class Scene(
     val roadRightOf: Double? = null,   // floor with world X beyond this is road (else sidewalk)
     val grassLeftOf: Double? = null,   // floor with world X below this is grass
     val semantics: Boolean = false,    // attach perfect per-pixel labels (stands in for the model)
+    val stepCounter: Boolean = false,  // attach a step count, as from the accelerometer
+    val stepLength: Double = 0.65,     // the simulated walker's true step length
+    val fps: Double = 30.0,
 )
 
 /**
@@ -54,6 +57,8 @@ class SimCamera(
     private var py = 0.0
     private var yaw = 0.0          // radians, + = right
     private var walked = 0.0
+    private var totalWalked = 0.0
+    private var frameIndex = 0
     private var lastRotation: DoubleArray? = null
 
     override fun start() {}
@@ -65,6 +70,8 @@ class SimCamera(
         px += scene.walkSpeed * sin(yaw)
         py += scene.walkSpeed * cos(yaw)
         walked += scene.walkSpeed
+        totalWalked += scene.walkSpeed
+        frameIndex++
         yaw += Math.toRadians(scene.yawRateDeg)
         if (scene.walkSpeed > 0 && walked > scene.loopAt) {
             px = 0.0; py = 0.0; yaw = 0.0; walked = 0.0; lastRotation = null
@@ -149,6 +156,8 @@ class SimCamera(
         return DepthImage(
             width, height, depth, f.toFloat(), f.toFloat(), (width / 2.0).toFloat(), (height / 2.0).toFloat(),
             gravity, gyro, labels?.let { SemanticImage(width, height, it) },
+            timestampMs = frameIndex * 1000.0 / s.fps,
+            stepCount = if (s.stepCounter) (totalWalked / s.stepLength).toInt() else null,
         )
     }
 

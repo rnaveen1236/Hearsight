@@ -6,15 +6,22 @@ import kotlin.math.cos
 import kotlin.math.sqrt
 
 /**
- * Low-pass filters accelerometer samples into a stable "up" direction.
+ * Estimates the "up" direction in camera coordinates from the IMU.
  *
- * A resting accelerometer measures the reaction to gravity, which points up. For the
- * RealSense D435i / D455 the IMU axes match the depth camera's (x right, y down, z forward),
- * so a level camera reads about (0, -9.8, 0). Samples whose magnitude is far from 1 g are
- * jolts from walking, not gravity, and are skipped.
+ * Accelerometer: a resting accelerometer measures the reaction to gravity, which points up.
+ * For the RealSense D435i / D455 the IMU axes match the depth camera's (x right, y down,
+ * z forward), so a level camera reads about (0, -9.8, 0). Samples whose magnitude is far from
+ * 1 g are jolts from walking, not gravity, and are skipped.
+ *
+ * Gyroscope (complementary filter): when gyro samples arrive via [addGyro], the up vector is
+ * rotated with the head immediately, and the accelerometer only slowly corrects the gyro's
+ * drift ([Params.gravityAlphaWithGyro]). Without a gyro, the accelerometer alone is low-pass
+ * filtered ([Params.gravityAlpha]), which lags behind fast head tilts.
  */
 class GravityFilter(private val p: Params = Params()) {
     private var v: DoubleArray? = null
+    private var lastGyroMs = Double.NaN
+    private var gyroSeen = false
     var samples = 0
         private set
 
@@ -25,23 +32,45 @@ class GravityFilter(private val p: Params = Params()) {
         val cur = v
         val next = if (cur == null) doubleArrayOf(ax / norm, ay / norm, az / norm)
         else {
-            val k = p.gravityAlpha
+            val k = if (gyroSeen && samples >= p.gravityMinSamples) p.gravityAlphaWithGyro else p.gravityAlpha
             doubleArrayOf(
                 (1 - k) * cur[0] + k * ax / norm,
                 (1 - k) * cur[1] + k * ay / norm,
                 (1 - k) * cur[2] + k * az / norm,
             )
         }
-        val len = sqrt(next[0] * next[0] + next[1] * next[1] + next[2] * next[2])
-        v = doubleArrayOf(next[0] / len, next[1] / len, next[2] / len)
+        v = normalize(next)
         samples++
         return true
+    }
+
+    /**
+     * Adds one gyroscope sample (rad/s, camera frame): rotates the up vector by the head's
+     * rotation since the previous gyro sample.
+     */
+    fun addGyro(wx: Double, wy: Double, wz: Double, timestampMs: Double) {
+        val prev = lastGyroMs
+        lastGyroMs = timestampMs
+        gyroSeen = true
+        val cur = v ?: return
+        if (prev.isNaN()) return
+        val dt = ((timestampMs - prev) / 1000.0).coerceIn(0.0, 0.02)
+        if (dt <= 0) return
+        // The camera turned by R (previous <- current); a fixed world vector in the new camera
+        // frame is R^T times its old coordinates.
+        val r = M3.exp(wx * dt, wy * dt, wz * dt)
+        v = normalize(M3.apply(M3.transpose(r), cur[0], cur[1], cur[2]))
     }
 
     /** Current unit up vector, or null until enough samples have arrived. */
     fun up(): DoubleArray? = if (samples >= p.gravityMinSamples) v?.copyOf() else null
 
-    fun reset() { v = null; samples = 0 }
+    fun reset() { v = null; samples = 0; lastGyroMs = Double.NaN; gyroSeen = false }
+
+    private fun normalize(a: DoubleArray): DoubleArray {
+        val len = sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+        return doubleArrayOf(a[0] / len, a[1] / len, a[2] / len)
+    }
 }
 
 /**

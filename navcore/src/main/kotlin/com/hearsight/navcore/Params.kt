@@ -33,6 +33,7 @@ data class Params(
     val gravityMinNorm: Double = 7.8,    // accelerometer samples outside this range (m/s^2)
     val gravityMaxNorm: Double = 11.8,   // are walking jolts, not gravity: ignored
     val gravityAlpha: Double = 0.05,     // low-pass filter on the gravity direction
+    val gravityAlphaWithGyro: Double = 0.01, // accelerometer correction when the gyro tracks rotation
     val gravityMinSamples: Int = 10,
 
     // --- depth-inertial odometry ---
@@ -54,6 +55,15 @@ data class Params(
     val odomMaxGyroDisagreeDeg: Double = 10.0,
     val odomKeyframeDist: Double = 0.30,
     val odomKeyframeDeg: Double = 12.0,
+    // --- step counting (walking speed for corridors) ---
+    val stepThreshold: Double = 0.9,     // m/s^2 of vertical bounce that counts as a step
+    val stepMinIntervalMs: Double = 280.0,
+    val defaultStepLength: Double = 0.65, // until learned from depth odometry
+    val stepCalibrationSteps: Int = 8,   // steps per calibration window
+    val cadenceWindowMs: Double = 2500.0,
+    val typicalCadenceHz: Double = 1.8,  // assumed until two steps give a measured cadence
+    val stepTimeoutMs: Double = 1200.0,  // no step for this long = standing still
+
     val trailEvery: Int = 3,             // keep every n-th pose for the trail on the map
     val trailLength: Int = 40,
 

@@ -6,6 +6,7 @@ import com.hearsight.navcore.DepthImage
 import com.hearsight.navcore.DepthSource
 import com.hearsight.navcore.GravityFilter
 import com.hearsight.navcore.GyroIntegrator
+import com.hearsight.navcore.StepDetector
 import com.intel.realsense.librealsense.Config
 import com.intel.realsense.librealsense.DeviceListener
 import com.intel.realsense.librealsense.Extension
@@ -40,9 +41,10 @@ object Cameras {
  *
  * On cameras with an IMU (D435i, D455) the accelerometer and gyroscope streams are enabled
  * too. The accelerometer is filtered into a gravity "up" vector (floor tilt); the gyroscope is
- * integrated into the rotation between depth frames (odometry prediction). Both are attached
- * to each depth frame. librealsense reports IMU data in the depth camera's axes
- * (x right, y down, z forward).
+ * integrated into the rotation between depth frames (odometry prediction) and also keeps the
+ * up vector steady during head turns; accelerometer samples also feed a step counter
+ * (walking speed for corridors). All of it is attached to each depth frame. librealsense
+ * reports IMU data in the depth camera's axes (x right, y down, z forward).
  */
 class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> Unit) : DepthSource {
     companion object {
@@ -63,6 +65,7 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         private set
 
     private val gravity = GravityFilter()
+    private val steps = StepDetector()
     private val gyro = GyroIntegrator()
     private var imuEnabled = false
     private var gyroEnabled = false
@@ -121,6 +124,7 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
 
     override fun start() {
         gravity.reset()
+        steps.reset()
         gyro.reset()
         intrinsics = null
         // Most to least capable: (colour) + accel + gyro at the D455's rates, any rate, accel
@@ -246,6 +250,8 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         return DepthImage(
             w, h, depth, k[0], k[1], k[2], k[3], gravity.up(), if (gyroEnabled) gyro.take() else null,
             rgb = colour,
+            timestampMs = timestamp(frame),
+            stepCount = if (imuEnabled) steps.steps else null,
         )
     }
 
@@ -257,6 +263,7 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         try {
             val m = motionData(frame)
             gravity.add(m[0], m[1], m[2])
+            steps.add(m[0], m[1], m[2], timestamp(frame), gravity.up())
         } catch (t: Throwable) {
             Log.w(TAG, "Can't read accelerometer, continuing without IMU", t)
             imuEnabled = false
@@ -267,12 +274,20 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
     private fun readGyro(frame: Frame) {
         try {
             val m = motionData(frame)
-            val ts = (frame.javaClass.getMethod("getTimestamp").invoke(frame) as Number).toDouble()
+            val ts = timestamp(frame)
             gyro.add(m[0], m[1], m[2], ts)
+            gravity.addGyro(m[0], m[1], m[2], ts)
         } catch (t: Throwable) {
             Log.w(TAG, "Can't read gyroscope, continuing without it", t)
             gyroEnabled = false
         }
+    }
+
+    /** Frame timestamp in ms (Frame.getTimestamp(), via reflection like the other frame metadata). */
+    private fun timestamp(frame: Frame): Double = try {
+        (frame.javaClass.getMethod("getTimestamp").invoke(frame) as Number).toDouble()
+    } catch (_: Throwable) {
+        System.nanoTime() / 1e6
     }
 
     /** x, y, z of a motion frame via MotionFrame.getMotionData() -> Float3 (fields or getters). */

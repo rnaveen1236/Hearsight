@@ -26,6 +26,10 @@ class DepthImage(
     val semantics: SemanticImage? = null,
     /** Colour image aligned to the depth image (RGB bytes, width x height), if streamed. */
     val rgb: ByteArray? = null,
+    /** Capture time in milliseconds (any epoch); used for odometry timing. */
+    val timestampMs: Double? = null,
+    /** Cumulative walking steps counted from the accelerometer ([StepDetector]), if available. */
+    val stepCount: Int? = null,
 )
 
 /**

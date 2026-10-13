@@ -25,6 +25,10 @@ class OdometryResult(
     val headingDeg: Double,
     /** Total distance travelled, metres. */
     val distance: Double,
+    /** Walking speed from the step counter, m/s (null without one). */
+    val stepSpeed: Double? = null,
+    /** Learned step length, metres (null without a step counter). */
+    val stepLength: Double? = null,
 )
 
 /**
@@ -40,6 +44,12 @@ class OdometryResult(
  * - Frame-to-keyframe alignment limits drift; a new keyframe is taken after moving
  *   [Params.odomKeyframeDist] or turning [Params.odomKeyframeDeg].
  *
+ * - Walking speed: with a step counter ([DepthImage.stepCount]) the prediction's horizontal
+ *   forward component comes from cadence x step length instead of constant velocity. ICP
+ *   overrides it wherever geometry constrains motion; where it can't (a bare corridor), the
+ *   step-based distance is used. Step length is learned from frames where ICP constrained
+ *   all six degrees of freedom.
+ *
  * Coordinates follow the RealSense camera frame (x right, y down, z forward). Gyro deltas
  * come in as [DepthImage.gyroDelta]: the current camera's rotation expressed in the previous
  * camera's frame.
@@ -50,6 +60,9 @@ class DepthInertialOdometry(private val p: Params = Params()) {
     private var keyFromPrev = Rigid.IDENTITY
     private var velocity = DoubleArray(3)  // last frame's translation, previous <- current
     private var distance = 0.0
+    private val walking = WalkingSpeed(p)
+    private var lastTimestamp = Double.NaN
+    private var lastStepSpeed: Double? = null
     var pose: Rigid = Rigid.IDENTITY
         private set
 
@@ -67,6 +80,11 @@ class DepthInertialOdometry(private val p: Params = Params()) {
      */
     fun update(img: DepthImage, upHint: DoubleArray? = null): OdometryResult {
         val maps = VertexMaps.build(img, p.odomStride, p.odomMaxDepth)
+        val ts = img.timestampMs
+        val dt = if (ts != null && !lastTimestamp.isNaN()) ((ts - lastTimestamp) / 1000.0).coerceIn(0.005, 0.2) else 1.0 / 30
+        if (ts != null) lastTimestamp = ts
+        val steps = img.stepCount
+        if (ts != null && steps != null) walking.update(ts, steps)
         val k = key
         if (k == null) {
             worldFromKey = Rigid(gravityAlignedRotation(img.gravityUp ?: upHint), DoubleArray(3))
@@ -77,7 +95,16 @@ class DepthInertialOdometry(private val p: Params = Params()) {
         }
 
         val gyro = img.gyroDelta ?: M3.identity()
-        val predicted = Rigid(gyro, velocity.copyOf())       // previous <- current
+        val up = img.gravityUp ?: doubleArrayOf(0.0, -1.0, 0.0)
+        val fwd = horizontalForward(up)
+        lastStepSpeed = if (ts != null && steps != null) walking.speed(ts) else null
+        val predictedT = velocity.copyOf()
+        lastStepSpeed?.let { v ->
+            // replace the horizontal-forward part of constant velocity with the step speed
+            val along = predictedT[0] * fwd[0] + predictedT[1] * fwd[1] + predictedT[2] * fwd[2]
+            for (a in 0 until 3) predictedT[a] += (v * dt - along) * fwd[a]
+        }
+        val predicted = Rigid(gyro, predictedT)               // previous <- current
         val guess = keyFromPrev.compose(predicted)            // keyframe <- current
         val icp = align(k, maps, guess, hasGyro = img.gyroDelta != null)
             ?.takeIf { plausible(it.transform, gyro, img.gyroDelta != null) }
@@ -95,6 +122,16 @@ class DepthInertialOdometry(private val p: Params = Params()) {
 
         val prevFromCur = keyFromPrev.inverse().compose(keyFromCur)
         velocity = if (tracking == Tracking.LOST) DoubleArray(3) else prevFromCur.t.copyOf()
+        if (steps != null) {
+            if (tracking == Tracking.OK) {
+                val t = prevFromCur.t
+                val vert = t[0] * up[0] + t[1] * up[1] + t[2] * up[2]
+                val h = sqrt(maxOf(0.0, t[0] * t[0] + t[1] * t[1] + t[2] * t[2] - vert * vert))
+                walking.calibrate(h, steps)
+            } else {
+                walking.interrupt(steps)
+            }
+        }
         distance += prevFromCur.translationNorm
         pose = worldFromKey.compose(keyFromCur).normalized()
 
@@ -113,7 +150,17 @@ class DepthInertialOdometry(private val p: Params = Params()) {
 
     private fun result(tracking: Tracking, inliers: Int): OdometryResult {
         val f = M3.apply(pose.r, 0.0, 0.0, 1.0)  // camera forward in world
-        return OdometryResult(pose, tracking, inliers, Math.toDegrees(atan2(f[0], f[1])), distance)
+        return OdometryResult(
+            pose, tracking, inliers, Math.toDegrees(atan2(f[0], f[1])), distance,
+            lastStepSpeed, if (lastStepSpeed != null) walking.stepLength else null,
+        )
+    }
+
+    /** Camera forward (z) projected onto the horizontal plane, unit length, camera coordinates. */
+    private fun horizontalForward(up: DoubleArray): DoubleArray {
+        val f = doubleArrayOf(-up[2] * up[0], -up[2] * up[1], 1.0 - up[2] * up[2])
+        val l = sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2])
+        return if (l < 1e-6) doubleArrayOf(0.0, 0.0, 1.0) else doubleArrayOf(f[0] / l, f[1] / l, f[2] / l)
     }
 
     private class Icp(val transform: Rigid, val inliers: Int, val degenerateDims: Int)
