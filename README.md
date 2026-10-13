@@ -37,11 +37,12 @@ an obstacle/cost map, human-centred path planning and turn-by-turn haptic guidan
 
 ## What you need
 
-- An **Intel RealSense D435, D435i, D455 or similar D4xx** camera.
+- An **Intel RealSense D455**. Other D4xx cameras work, but the defaults are tuned for
+  the D455 (see *Using a different camera* below).
 - An **Android phone with USB-C OTG** (OnePlus phones support it; Android 8.0+).
-- A **USB-C to USB-C cable** (or the RealSense USB cable plus a USB-C OTG adapter). A
-  USB 3 cable and port is better, but the app's 424x240 @ 30 fps depth stream also fits
-  in USB 2.0.
+- A **USB-C to USB-C data cable**. The D455 has a USB-C port, so no adapter is needed. A
+  USB 3 cable is better, but the app's 424x240 @ 30 fps depth stream also fits in
+  USB 2.0. Short charge-only cables won't work: they carry no data.
 - **Android Studio** (recent stable version, with JDK 17) on a laptop to build the app.
 
 On some OnePlus models OTG switches itself off after 10 minutes of inactivity:
@@ -72,8 +73,11 @@ Android SDK must be installed, because Gradle configures the `app` module too).
 ## Mounting and using it
 
 - Mount the camera at **chest or head height, looking forward and slightly down**
-  (15–40°). It finds its height and tilt from the floor every frame, so no calibration
-  is needed. Keep the floor in view.
+  (15–40°). The D455 has a standard 1/4" tripod thread underneath, so a chest-mount
+  phone or GoPro harness with a tripod adapter works well. It finds its height and tilt
+  every frame, so no calibration is needed. Keep the floor in view.
+- The phone powers the D455 over USB, which drains its battery noticeably. Start with a
+  full charge, or use a power bank with a USB-C hub that supports OTG plus charging.
 - Earbuds are recommended for the stereo beeps; the phone can be in a pocket or a chest
   pouch. The screen stays on while the app is open.
 
@@ -126,6 +130,21 @@ depth frames stop arriving for more than 1 second.
 
 The whole step takes about 7 ms per frame on a desktop JVM. Expect roughly 15–30 ms on
 a recent phone.
+
+### D455 specifics
+
+| | D455 | What the app does with it |
+|---|---|---|
+| Depth stream | 424x240 @ 30 fps | Works over USB 2.0 too; every second pixel is used (about 25k points) |
+| Depth range | about 0.4–6 m | `minDepth` 0.4 m, `maxDepth` 6 m |
+| Depth noise | about half a D435's (95 mm vs 50 mm stereo baseline) | `noiseK` 0.006, so a 15 cm curb is seen from 2.5 m away; with D435-level noise allowance it isn't |
+| IMU | Accelerometer at 63 Hz | Gravity sets the floor tilt (see step 2 above) |
+| Field of view | 87° × 58° | Used if the device intrinsics can't be read |
+
+### Using a different camera
+
+For a D435 or D435i set `noiseK = 0.012f` in `Params.kt`; its depth is about twice as
+noisy. A plain D435 has no IMU, so the app uses depth-only floor detection automatically.
 
 ### Tuning
 

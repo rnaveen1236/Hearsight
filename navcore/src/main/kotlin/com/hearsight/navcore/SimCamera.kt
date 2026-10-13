@@ -22,7 +22,10 @@ data class Scene(
     val imuErrorDeg: Double = 0.0,     // IMU-to-depth misalignment, tilted about the camera x axis
 )
 
-/** Ray-cast synthetic depth camera, for tests and the app's demo mode (no RealSense needed). */
+/**
+ * Ray-cast synthetic depth camera, for tests and the app's demo mode (no RealSense needed).
+ * Defaults mimic a RealSense D455 at 424x240 with stride 2: 87 degree horizontal FOV.
+ */
 class SimCamera(
     val scene: Scene = Scene(boxes = listOf(Box(-0.4, 0.5, 2.3, 2.8, 1.0))),
     val width: Int = 212,

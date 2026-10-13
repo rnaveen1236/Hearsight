@@ -28,7 +28,8 @@ object Cameras {
 }
 
 /**
- * Intel RealSense D4xx over USB-OTG using Intel's Android wrapper.
+ * Intel RealSense D455 (also works with other D4xx) over USB-OTG using Intel's Android wrapper.
+ * The D455 has a USB-C port, so a USB-C to USB-C cable goes straight into the phone.
  *
  * 424x240 depth @ 30 fps fits in USB 2.0 bandwidth too, so it works even on phones (or
  * cables) without USB 3. No colour stream: the pipeline only needs depth.
@@ -42,7 +43,8 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         const val WIDTH = 424
         const val HEIGHT = 240
         const val FPS = 30
-        const val DEPTH_UNITS = 0.001f   // D4xx default: 1 mm per unit
+        const val DEPTH_UNITS = 0.001f   // D455 default: 1 mm per unit
+        const val ACCEL_FPS = 63         // D455 accelerometer runs at 63 or 250 Hz; 63 is plenty
         private const val TAG = "RealSense"
     }
 
@@ -73,28 +75,53 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
 
     fun isConnected(): Boolean = rsContext.queryDevices().use { it.deviceCount > 0 }
 
+    /** Model name, e.g. "Intel RealSense D455", or null if it can't be read. */
+    fun deviceName(): String? = try {
+        rsContext.queryDevices().use { list ->
+            if (list.deviceCount == 0) return null
+            // Reflection: Device / CameraInfo signatures differ between wrapper versions.
+            val device = list.javaClass.getMethod("createDevice", Int::class.javaPrimitiveType).invoke(list, 0)!!
+            try {
+                val info = Class.forName("com.intel.realsense.librealsense.CameraInfo")
+                val name = info.getField("NAME").get(null)
+                device.javaClass.getMethod("getInfo", info).invoke(device, name) as? String
+            } finally {
+                (device as? AutoCloseable)?.close()
+            }
+        }
+    } catch (t: Throwable) {
+        Log.w(TAG, "Can't read device name", t)
+        null
+    }
+
     override fun start() {
         gravity.reset()
         intrinsics = null
-        // Try depth + accelerometer; cameras without an IMU (plain D435) refuse that config.
-        pipeline = try {
-            startPipeline(withImu = true).also { imuEnabled = true }
-        } catch (t: Throwable) {
-            Log.i(TAG, "No accelerometer stream, depth only: ${t.message}")
-            imuEnabled = false
-            startPipeline(withImu = false)
+        // Depth + accelerometer at 63 Hz, then at any rate the camera offers, then depth only
+        // (cameras without an IMU, like the plain D435, refuse the accelerometer stream).
+        for (accelFps in listOf(ACCEL_FPS, 0)) {
+            try {
+                pipeline = startPipeline(accelFps)
+                imuEnabled = true
+                return
+            } catch (t: Throwable) {
+                Log.i(TAG, "Accelerometer at $accelFps Hz refused: ${t.message}")
+            }
         }
+        imuEnabled = false
+        pipeline = startPipeline(null)
     }
 
-    private fun startPipeline(withImu: Boolean): Pipeline {
+    /** [accelFps]: null = depth only, 0 = accelerometer at any rate. */
+    private fun startPipeline(accelFps: Int?): Pipeline {
         val pipe = Pipeline()
         try {
             Config().use { cfg ->
                 cfg.enableStream(StreamType.DEPTH, -1, WIDTH, HEIGHT, StreamFormat.Z16, FPS)
-                if (withImu) {
+                if (accelFps != null) {
                     // Looked up by name so this still builds against wrapper versions without them.
                     cfg.enableStream(
-                        StreamType.valueOf("ACCEL"), -1, 0, 0, StreamFormat.valueOf("MOTION_XYZ32F"), 0,
+                        StreamType.valueOf("ACCEL"), -1, 0, 0, StreamFormat.valueOf("MOTION_XYZ32F"), accelFps,
                     )
                 }
                 pipe.start(cfg).close()
@@ -179,7 +206,7 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
     /**
      * fx, fy, cx, cy of the depth stream. Read from the device via reflection because the
      * wrapper's intrinsics API differs between librealsense versions; falls back to the
-     * nominal D435/D455 depth field of view (87 x 58 degrees).
+     * nominal D455 depth field of view (87 x 58 degrees).
      */
     private fun readIntrinsics(frame: Any, w: Int, h: Int): FloatArray {
         try {

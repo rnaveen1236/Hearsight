@@ -18,6 +18,7 @@ class RealSenseCamera : DepthSource {
     val intrinsicsSource = "n/a"
     val imuStatus = "n/a"
     fun isConnected() = false
+    fun deviceName(): String? = null
     override fun start() {
         throw IllegalStateException("App built without librealsense.aar")
     }

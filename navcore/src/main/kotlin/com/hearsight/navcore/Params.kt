@@ -1,10 +1,16 @@
 package com.hearsight.navcore
 
-/** Tunable parameters for the perception / planning pipeline. Units: metres, degrees, seconds. */
+/**
+ * Tunable parameters for the perception / planning pipeline. Units: metres, degrees, seconds.
+ *
+ * Defaults are tuned for the Intel RealSense D455 (95 mm stereo baseline, ideal range
+ * 0.6-6 m, 87 x 58 degree depth FOV). For a D435 / D435i (50 mm baseline, about twice the
+ * depth noise at a given distance) use noiseK = 0.012f.
+ */
 data class Params(
     // --- point cloud ---
-    val minDepth: Float = 0.25f,
-    val maxDepth: Float = 6.0f,
+    val minDepth: Float = 0.4f,          // D455 minimum depth at 424x240; closer readings are noise
+    val maxDepth: Float = 6.0f,          // D455 ideal range ends at 6 m
     val stride: Int = 2,                 // pixel subsampling of the depth image
 
     // --- ground plane (RANSAC) ---
@@ -37,7 +43,7 @@ data class Params(
     val obstacleMinH: Float = 0.10f,     // higher than this above floor = obstacle (curb up, box, person)
     val obstacleMaxH: Float = 2.0f,      // ignore ceilings / things above head height
     val dropMinH: Float = 0.10f,         // lower than this below floor = drop-off (step down, curb, hole)
-    val noiseK: Float = 0.012f,          // depth noise grows ~z^2: thresholds += noiseK * dist^2
+    val noiseK: Float = 0.006f,          // depth noise grows ~z^2: thresholds += noiseK * dist^2 (D455)
     val minPoints: Int = 3,              // points needed to call a cell obstacle / drop-off
 
     // --- costs ---

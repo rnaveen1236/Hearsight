@@ -151,7 +151,11 @@ class MainActivity : Activity() {
     private fun updateStatus() {
         statusText.text = when {
             !Cameras.AVAILABLE -> "Built without librealsense: demo mode only (see README)."
-            camera.isConnected() -> "RealSense connected."
+            camera.isConnected() -> {
+                val name = camera.deviceName() ?: "RealSense"
+                if (name.contains("D455")) "$name connected."
+                else "$name connected. Settings are tuned for the D455: see Params.kt."
+            }
             else -> "RealSense not connected. Plug it in with a USB-C OTG cable."
         }
     }

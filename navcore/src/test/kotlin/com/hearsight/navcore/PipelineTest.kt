@@ -80,6 +80,22 @@ class PipelineTest {
     }
 
     @Test
+    fun d455NoiseModelSeesALowCurbThatGenericSettingsMiss() {
+        // 15 cm curb 2.5 m ahead, D455-like depth noise (0.5%).
+        val scene = Scene(boxes = listOf(Box(-2.5, 2.5, 2.5, 2.8, 0.15)))
+        fun curbSeen(params: Params): Boolean {
+            val cam = SimCamera(scene, noise = 0.005)
+            val pipe = Pipeline(params)
+            var res: StepResult? = null
+            repeat(3) { res = pipe.step(cam.read()) }
+            val g = res!!.grid!!
+            return (g.rowOf(2.4)..g.rowOf(2.9)).any { r -> (0 until g.cols).any { c -> g.obstacle[g.idx(r, c)] } }
+        }
+        assertTrue(curbSeen(Params()), "D455 defaults should see the curb")
+        assertFalse(curbSeen(Params(noiseK = 0.012f)), "generic D4xx noise allowance hides it")
+    }
+
+    @Test
     fun wallBlocksPath() {
         val res = run(Scene(boxes = listOf(Box(-3.0, 3.0, 1.6, 1.8, 2.0))))
         assertFalse(res.plan.reachable)
