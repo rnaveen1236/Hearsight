@@ -14,10 +14,13 @@ import com.hearsight.navcore.DepthSource
 import com.hearsight.navcore.Scene
 import com.hearsight.navcore.SimCamera
 import com.hearsight.navcore.StepResult
+import com.hearsight.navcore.Surface
 
 class MainActivity : Activity() {
     private lateinit var feedback: Feedback
     private lateinit var camera: RealSenseCamera
+    @Volatile private var segmenter: Segmenter? = null
+    @Volatile private var segmenterLoaded = false
     private var engine: NavigationEngine? = null
 
     private lateinit var commandText: TextView
@@ -26,6 +29,7 @@ class MainActivity : Activity() {
     private lateinit var map: MapView
     private lateinit var startButton: Button
     private lateinit var demoSwitch: Switch
+    private lateinit var outdoorSwitch: Switch
 
     @Volatile private var uiPending = false
     private var fps = 0.0
@@ -42,11 +46,19 @@ class MainActivity : Activity() {
         map = findViewById(R.id.map)
         startButton = findViewById(R.id.start)
         demoSwitch = findViewById(R.id.demo)
+        outdoorSwitch = findViewById(R.id.outdoor)
 
         feedback = Feedback(this)
         findViewById<CheckBox>(R.id.optVibrate).setOnCheckedChangeListener { _, on -> feedback.vibrate = on }
         findViewById<CheckBox>(R.id.optSpeech).setOnCheckedChangeListener { _, on -> feedback.speech = on }
         findViewById<CheckBox>(R.id.optBeeps).setOnCheckedChangeListener { _, on -> feedback.beeps = on }
+
+        // Loading the model takes a moment; do it off the UI thread.
+        Thread {
+            segmenter = Segmenter.load(this)
+            segmenterLoaded = true
+            runOnUiThread { updateStatus() }
+        }.start()
 
         camera = Cameras.realSense(this) { connected ->
             runOnUiThread {
@@ -68,17 +80,23 @@ class MainActivity : Activity() {
             return
         }
         val source: DepthSource = if (demo) demoCamera() else camera
-        engine = NavigationEngine(source, ::onResult) { msg ->
+        // Demo frames carry simulated labels; the real camera needs the model (and colour).
+        // The model is trained on street scenes: indoors it may call the floor "road", so it
+        // only runs when the user switches on outdoor mode.
+        val seg = if (demo || !outdoorSwitch.isChecked) null else segmenter
+        if (!demo) camera.wantColor = seg != null
+        engine = NavigationEngine(source, ::onResult, segmenter = seg, onError = { msg ->
             runOnUiThread {
                 detailText.text = msg
                 if (engine?.isRunning != true) stopGuidance()
             }
-        }.also { it.start() }
+        }).also { it.start() }
         feedback.active = true
         feedback.speak("Guidance started")
         startButton.setText(R.string.stop)
         startButton.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(239, 68, 68))
         demoSwitch.isEnabled = false
+        outdoorSwitch.isEnabled = false
     }
 
     private fun stopGuidance() {
@@ -89,14 +107,20 @@ class MainActivity : Activity() {
         startButton.setText(R.string.start)
         startButton.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(34, 197, 94))
         demoSwitch.isEnabled = true
+        outdoorSwitch.isEnabled = true
         commandText.text = "READY"
         commandText.setTextColor(Color.rgb(244, 244, 245))
     }
 
-    /** A corridor with boxes and a step down, walked through on a loop. */
+    /** A sidewalk beside a road, with a box, a person and a step down, walked on a loop. */
     private fun demoCamera() = SimCamera(
         Scene(
-            boxes = listOf(Box(-0.4, 0.5, 3.0, 3.5, 1.0), Box(0.8, 1.6, 5.0, 5.5, 1.8)),
+            boxes = listOf(
+                Box(-0.4, 0.5, 3.0, 3.5, 1.0),
+                Box(-1.3, -0.9, 5.0, 5.3, 1.7, Surface.PERSON),
+            ),
+            roadRightOf = 1.4,
+            semantics = true,
             stepDownAt = 7.5,
             walkSpeed = 0.03,
             loopAt = 6.0,
@@ -144,6 +168,14 @@ class MainActivity : Activity() {
             append("%.0f fps · %.0f ms/frame".format(fps, r.millis))
             if (pl != null) append(" · cam %.2f m, pitch %.0f°".format(pl.cameraHeight, pl.pitchDeg))
             append(" · floor: ${r.floorSource.name.lowercase()}")
+            append(
+                when {
+                    demoSwitch.isChecked -> " · labels: simulated"
+                    segmenter == null -> " · no segmentation model"
+                    !outdoorSwitch.isChecked -> " · indoor (no segmentation)"
+                    else -> " · seg %.0f ms".format(engine?.segMillis ?: 0.0)
+                },
+            )
             r.odometry?.let {
                 append(" · odom ${it.tracking.name.lowercase()}, heading %+.0f°, %.1f m".format(it.headingDeg, it.distance))
             }
@@ -167,6 +199,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         engine?.stop()
         feedback.shutdown()
+        segmenter?.close()
         super.onDestroy()
     }
 }

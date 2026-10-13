@@ -7,8 +7,15 @@ import kotlin.math.sin
 import kotlin.math.tan
 import kotlin.random.Random
 
-/** A floor-standing box in world coordinates (X right, Y forward, Z up). */
-data class Box(val xMin: Double, val xMax: Double, val yMin: Double, val yMax: Double, val zMax: Double)
+/** A floor-standing box in world coordinates (X right, Y forward, Z up); [kind] is its label. */
+data class Box(
+    val xMin: Double,
+    val xMax: Double,
+    val yMin: Double,
+    val yMax: Double,
+    val zMax: Double,
+    val kind: Surface = Surface.STRUCTURE,
+)
 
 data class Scene(
     val height: Double = 1.6,          // camera height above the floor
@@ -22,6 +29,9 @@ data class Scene(
     val imu: Boolean = false,          // provide gravity "up" and gyro deltas like a D455
     val imuErrorDeg: Double = 0.0,     // IMU-to-depth misalignment, tilted about the camera x axis
     val gyroNoiseDeg: Double = 0.0,    // random gyro error per frame
+    val roadRightOf: Double? = null,   // floor with world X beyond this is road (else sidewalk)
+    val grassLeftOf: Double? = null,   // floor with world X below this is grass
+    val semantics: Boolean = false,    // attach perfect per-pixel labels (stands in for the model)
 )
 
 /**
@@ -82,6 +92,7 @@ class SimCamera(
         val rot = rotation()
         val ox = px; val oy = py; val oz = s.height
         val depth = FloatArray(width * height)
+        val labels = if (s.semantics) ByteArray(width * height) else null
 
         for (v in 0 until height) for (u in 0 until width) {
             val x = (u - width / 2.0) / f
@@ -91,6 +102,7 @@ class SimCamera(
             val dy = rot[3] * x + rot[4] * y + rot[5]
             val dz = rot[6] * x + rot[7] * y + rot[8]
             var t = Double.POSITIVE_INFINITY
+            var kind = Surface.SKY
 
             if (dz < 0) {
                 var tf = -oz / dz
@@ -103,12 +115,19 @@ class SimCamera(
                     }
                 }
                 t = tf
+                val hx = ox + tf * dx
+                kind = when {
+                    s.roadRightOf != null && hx > s.roadRightOf -> Surface.ROAD
+                    s.grassLeftOf != null && hx < s.grassLeftOf -> Surface.TERRAIN
+                    else -> Surface.WALKWAY
+                }
             }
             for (b in s.boxes) {
                 val hit = rayBox(ox, oy, oz, dx, dy, dz, b)
-                if (hit != null) t = min(t, hit)
+                if (hit != null && hit < t) { t = hit; kind = b.kind }
             }
             if (t.isFinite()) depth[v * width + u] = (t * (1 + noise * rnd.nextGaussian())).toFloat()
+            if (labels != null) labels[v * width + u] = kind.code
         }
 
         var gravity: DoubleArray? = null
@@ -129,7 +148,7 @@ class SimCamera(
         lastRotation = rot
         return DepthImage(
             width, height, depth, f.toFloat(), f.toFloat(), (width / 2.0).toFloat(), (height / 2.0).toFloat(),
-            gravity, gyro,
+            gravity, gyro, labels?.let { SemanticImage(width, height, it) },
         )
     }
 

@@ -1,5 +1,7 @@
 package com.hearsight.navcore
 
+import java.util.concurrent.ConcurrentLinkedQueue
+
 /** Anything that produces depth frames: the RealSense on the phone, or [SimCamera]. */
 interface DepthSource {
     fun start()
@@ -24,10 +26,27 @@ class StepResult(
     val odometry: OdometryResult? = null,
     /** Recent positions (oldest first) in the current ground frame: the red arrow trail. */
     val trail: List<TrailPoint> = emptyList(),
+    /** Id of this frame; pass it to [Pipeline.submitSemantics] with the frame's labels. */
+    val frameId: Long = 0,
 )
 
-/** One perception -> planning -> guidance step per depth frame. */
+/**
+ * One perception -> planning -> guidance step per depth frame.
+ *
+ * Segmentation is slower than the depth camera, so its labels can arrive a few frames late:
+ * [submitSemantics] (any thread) queues them with their frame id, and the next [step] fuses
+ * them using that frame's own points, pose and floor, so labels land on the right geometry.
+ */
 class Pipeline(val params: Params = Params()) {
+    private class Recent(val id: Long, val pts: PointCloud, val pose: Rigid, val plane: Plane)
+    private val recent = ArrayDeque<Recent>()
+    private val pendingSemantics = ConcurrentLinkedQueue<Pair<Long, SemanticImage>>()
+
+    /** Thread-safe: labels for the frame [frameId] (see [StepResult.frameId]). */
+    fun submitSemantics(frameId: Long, sem: SemanticImage) {
+        pendingSemantics.add(frameId to sem)
+    }
+
     private val tracker = PlaneTracker(params)
     private val guidance = Guidance(params)
     private var lastGoal: Pt? = null
@@ -38,6 +57,7 @@ class Pipeline(val params: Params = Params()) {
 
     fun step(img: DepthImage): StepResult {
         val t0 = System.nanoTime()
+        val id = frame++
         val pts = deproject(img, params)
         // With an IMU the floor's tilt is known and only its height is searched for;
         // otherwise (plain D435, or IMU not settled yet) fit the whole plane from depth.
@@ -56,21 +76,34 @@ class Pipeline(val params: Params = Params()) {
         val grid = plane?.let {
             if (params.fuseMap) {
                 map.integrate(img, pts, odo.pose, it)
+                img.semantics?.let { sem -> map.integrateSemantics(pts, sem, odo.pose, it) }
+                drainSemantics()
+                recent.addLast(Recent(id, pts, odo.pose, it))
+                while (recent.size > RECENT_FRAMES) recent.removeFirst()
                 map.toGrid(odo.pose, it)
             } else {
-                buildGrid(pts, it, params)
+                buildGrid(pts, it, params, img.semantics)
             }
         }
         val pl = grid?.let { plan(it, params, lastGoal) } ?: Plan()
         lastGoal = pl.path.lastOrNull()
         val cue = guidance.update(pl, grid)
 
-        if (frame++ % params.trailEvery == 0L) {
+        if (id % params.trailEvery == 0L) {
             history.addLast(odo.pose)
             while (history.size > params.trailLength) history.removeFirst()
         }
         val trail = plane?.let { trailOnMap(odo.pose, it) } ?: emptyList()
-        return StepResult(plane, grid, pl, cue, (System.nanoTime() - t0) / 1e6, source, odo, trail)
+        return StepResult(plane, grid, pl, cue, (System.nanoTime() - t0) / 1e6, source, odo, trail, id)
+    }
+
+    /** Fuses labels that arrived for recent frames; drops ones for frames already forgotten. */
+    private fun drainSemantics() {
+        while (true) {
+            val (id, sem) = pendingSemantics.poll() ?: return
+            val f = recent.firstOrNull { it.id == id } ?: continue
+            map.integrateSemantics(f.pts, sem, f.pose, f.plane)
+        }
     }
 
     /** Past camera positions expressed in the current camera's floor frame (fwd, lat). */
@@ -87,5 +120,9 @@ class Pipeline(val params: Params = Params()) {
             val hl = ra[0] * f[0] + ra[1] * f[1] + ra[2] * f[2]
             TrailPoint(Pt(fwd, lat), Math.toDegrees(Math.atan2(hl, hf)))
         }
+    }
+
+    private companion object {
+        const val RECENT_FRAMES = 30  // about 1 s at 30 fps: labels older than this are dropped
     }
 }

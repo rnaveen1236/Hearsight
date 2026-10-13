@@ -77,6 +77,14 @@
     </LinearLayout>
 
     <Switch
+        android:id="@+id/outdoor"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:checked="false"
+        android:text="@string/outdoor"
+        android:textColor="#F4F4F5" />
+
+    <Switch
         android:id="@+id/demo"
         android:layout_width="match_parent"
         android:layout_height="48dp"

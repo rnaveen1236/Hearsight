@@ -92,6 +92,17 @@ data class Params(
     val inflationWeight: Float = 3.0f,
     val unknownCost: Float = 3.0f,
 
+    // --- semantics (segmentation) ---
+    val roadCost: Float = 6.0f,          // per cell: the planner strongly prefers sidewalk / floor
+    val terrainCost: Float = 1.0f,       // grass, soil: walkable, mildly avoided
+    val personRadius: Float = 0.60f,     // keep-out around people (vs bodyRadius around walls)
+    val vehicleRadius: Float = 0.80f,
+    val semMinPoints: Int = 2,           // labelled points a cell needs (single frame)
+    val semMinEvidence: Float = 1.0f,    // label evidence a map column needs (fused)
+    val semMaxEvidence: Float = 20.0f,
+    val objectLabelDecay: Float = 0.9f,  // per labelled frame: object labels follow moving things
+    val roadWarnDist: Double = 3.0,      // say "Road ahead" when road is this close in the walking corridor
+
     // --- planning / steering ---
     val lateralPenalty: Double = 0.6,    // goal score = fwd - lateralPenalty*|lat| - costWeight*pathCost
     val costWeight: Double = 0.02,

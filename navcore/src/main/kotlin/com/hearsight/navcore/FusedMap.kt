@@ -21,6 +21,10 @@ import kotlin.math.min
  * - **No ghost heads:** when the lower part of an occupied column is seen to be empty (a
  *   person walked off), its out-of-view upper part is cleared with it. A shelf above the
  *   view is kept: nothing was ever occupied below it.
+ * - **Semantics:** labelled frames add per-column votes for the ground type (sidewalk, road,
+ *   grass) from floor-level points, and for the object type (person, vehicle, structure) from
+ *   points above the floor. Ground votes persist like the floor; object votes fade quickly so
+ *   they follow moving people.
  * - **Forgetting:** all evidence decays slowly ([Params.mapDecay]) to forgive odometry drift.
  *
  * [toGrid] samples the map into the usual egocentric planning [Grid].
@@ -36,11 +40,13 @@ class FusedMap(private val p: Params = Params()) {
     private var occ = FloatArray(nxy * nxy * nz)
     private var floorEv = FloatArray(nxy * nxy)
     private var dropEv = FloatArray(nxy * nxy)
+    private var groundEv = FloatArray(nxy * nxy * Surface.COUNT)
+    private var objectEv = FloatArray(nxy * nxy * Surface.COUNT)
     var initialized = false
         private set
 
     fun clear() {
-        occ.fill(0f); floorEv.fill(0f); dropEv.fill(0f)
+        occ.fill(0f); floorEv.fill(0f); dropEv.fill(0f); groundEv.fill(0f); objectEv.fill(0f)
         initialized = false
     }
 
@@ -61,6 +67,7 @@ class FusedMap(private val p: Params = Params()) {
         if (p.mapDecay < 1f) {
             val k = p.mapDecay
             for (i in floorEv.indices) { floorEv[i] *= k; dropEv[i] *= k }
+            for (i in groundEv.indices) groundEv[i] *= k
         }
 
         val (fa, _) = groundFrame(plane)
@@ -86,6 +93,34 @@ class FusedMap(private val p: Params = Params()) {
                     dropEv[col] = min(dropEv[col] + p.mapHit, p.mapMaxLogOdds)
                     floorEv[col] = max(floorEv[col] - p.mapMiss, p.mapMinLogOdds)
                 }
+            }
+        }
+    }
+
+    /**
+     * Adds per-pixel labels [sem] for an earlier frame: [pts], [pose] and [plane] must be that
+     * frame's, so labels land on exactly the geometry they were computed for.
+     */
+    fun integrateSemantics(pts: PointCloud, sem: SemanticImage, pose: Rigid, plane: Plane) {
+        if (!initialized) return
+        val k = p.objectLabelDecay
+        for (i in objectEv.indices) objectEv[i] *= k
+        val (fa, _) = groundFrame(plane)
+        val nc = Surface.COUNT
+        for (i in 0 until pts.size step p.mapPointStep) {
+            val label = pts.label(i, sem)
+            if (label == Surface.UNKNOWN || label == Surface.SKY) continue
+            val x = pts.x(i); val y = pts.y(i); val z = pts.z(i)
+            val h = plane.height(x, y, z)
+            val fwd = fa[0] * x + fa[1] * y + fa[2] * z
+            val noise = p.noiseK * fwd * fwd
+            val w = pose.apply(x.toDouble(), y.toDouble(), z.toDouble())
+            val col = column(w[0], w[1])
+            if (col < 0) continue
+            if (abs(h) < p.floorTol + noise && label.isGround()) {
+                groundEv[col * nc + label.ordinal] = min(groundEv[col * nc + label.ordinal] + 1f, p.semMaxEvidence)
+            } else if (h > p.obstacleMinH + noise && h < p.obstacleMaxH && label.isObject()) {
+                objectEv[col * nc + label.ordinal] = min(objectEv[col * nc + label.ordinal] + 1f, p.semMaxEvidence)
             }
         }
     }
@@ -155,6 +190,8 @@ class FusedMap(private val p: Params = Params()) {
         val dropoff = BooleanArray(n)
         val floorMask = BooleanArray(n)
         val unknown = BooleanArray(n)
+        val ground = ByteArray(n)
+        val objectType = ByteArray(n)
         val (fa, ra) = groundFrame(plane)
         // the point on the floor right below the camera
         val footX = -plane.d * plane.nx; val footY = -plane.d * plane.ny; val footZ = -plane.d * plane.nz
@@ -172,8 +209,20 @@ class FusedMap(private val p: Params = Params()) {
             dropoff[k] = !obs && dr > p.mapOccupied && dr > fl
             floorMask[k] = !obs && !dropoff[k] && fl > p.mapSeen
             unknown[k] = !obs && fl <= p.mapSeen && dr <= p.mapSeen
+            ground[k] = strongest(groundEv, col) { it.isGround() }
+            if (obs) objectType[k] = strongest(objectEv, col) { it.isObject() }
         }
-        return finishGrid(rows, cols, p, obstacle, dropoff, floorMask, unknown)
+        return finishGrid(rows, cols, p, obstacle, dropoff, floorMask, unknown, ground, objectType)
+    }
+
+    private fun strongest(ev: FloatArray, col: Int, filter: (Surface) -> Boolean): Byte {
+        var best = Surface.UNKNOWN
+        var bestV = p.semMinEvidence
+        for (s in Surface.values()) if (filter(s)) {
+            val v = ev[col * Surface.COUNT + s.ordinal]
+            if (v >= bestV) { bestV = v; best = s }
+        }
+        return best.code
     }
 
     /** Number of occupied voxels, for diagnostics. */
@@ -215,6 +264,9 @@ class FusedMap(private val p: Params = Params()) {
         val newOcc = FloatArray(occ.size)
         val newFloor = FloatArray(layer)
         val newDrop = FloatArray(layer)
+        val nc = Surface.COUNT
+        val newGround = FloatArray(layer * nc)
+        val newObject = FloatArray(layer * nc)
         for (iy in 0 until nxy) {
             val oy = iy + sy
             if (oy !in 0 until nxy) continue
@@ -225,12 +277,16 @@ class FusedMap(private val p: Params = Params()) {
                 val src = oy * nxy + ox
                 newFloor[dst] = floorEv[src]
                 newDrop[dst] = dropEv[src]
+                for (c in 0 until nc) {
+                    newGround[dst * nc + c] = groundEv[src * nc + c]
+                    newObject[dst * nc + c] = objectEv[src * nc + c]
+                }
                 for (z in 0 until nz) {
                     newOcc[z * layer + dst] = occ[z * layer + src]
                 }
             }
         }
-        occ = newOcc; floorEv = newFloor; dropEv = newDrop
+        occ = newOcc; floorEv = newFloor; dropEv = newDrop; groundEv = newGround; objectEv = newObject
         originX += sx * res
         originY += sy * res
     }

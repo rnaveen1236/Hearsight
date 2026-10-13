@@ -9,12 +9,15 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
+import com.hearsight.navcore.Params
 import com.hearsight.navcore.Pt
 import com.hearsight.navcore.StepResult
+import com.hearsight.navcore.Surface
 
 /**
  * Top-down debug map in the style of the dotLumen demo: floor shading, obstacles, path, target,
  * and below the user a strip showing the odometry trail (where they came from, as red arrows).
+ * Segmentation colours: road amber, grass green, people yellow, vehicles orange.
  */
 class MapView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
     @Volatile private var result: StepResult? = null
@@ -53,11 +56,28 @@ class MapView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
         for (row in 0 until g.rows) for (col in 0 until g.cols) {
             val i = g.idx(row, col)
             val c = when {
-                g.obstacle[i] -> Color.rgb(220, 40, 40)
+                g.obstacle[i] -> when (g.objectAt(i)) {
+                    Surface.PERSON -> Color.rgb(250, 204, 21)
+                    Surface.VEHICLE -> Color.rgb(249, 115, 22)
+                    else -> Color.rgb(220, 40, 40)
+                }
                 g.dropoff[i] -> Color.rgb(200, 40, 200)
                 g.cost[i].isInfinite() -> Color.rgb(30, 30, 30)
                 g.unknown[i] -> Color.rgb(55, 55, 55)
-                else -> (235 - 25 * g.cost[i]).toInt().coerceIn(40, 235).let { Color.rgb(it, it, it) }
+                else -> {
+                    // Shade by cost, without the surface's own cost so road isn't just "dark".
+                    val surfaceCost = when (g.groundAt(i)) {
+                        Surface.ROAD -> PARAMS.roadCost
+                        Surface.TERRAIN -> PARAMS.terrainCost
+                        else -> 0f
+                    }
+                    val v = (235 - 25 * (g.cost[i] - surfaceCost)).toInt().coerceIn(40, 235)
+                    when (g.groundAt(i)) {
+                        Surface.ROAD -> Color.rgb(v, v * 3 / 5, v / 4)
+                        Surface.TERRAIN -> Color.rgb(v * 3 / 5, v, v * 2 / 5)
+                        else -> Color.rgb(v, v, v)
+                    }
+                }
             }
             pixels[(g.rows - 1 - row) * g.cols + col] = c  // forward = up
         }
@@ -114,5 +134,6 @@ class MapView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
 
     private companion object {
         const val BEHIND_METRES = 1.5f
+        val PARAMS = Params()
     }
 }

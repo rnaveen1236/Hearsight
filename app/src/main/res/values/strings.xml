@@ -7,5 +7,6 @@
     <string name="vibrate">Vibrate</string>
     <string name="speech">Speech</string>
     <string name="beeps">Stereo beeps</string>
+    <string name="outdoor">Outdoor: detect road, people, vehicles</string>
     <string name="map_description">Live map of walkable floor, obstacles and planned path</string>
 </resources>

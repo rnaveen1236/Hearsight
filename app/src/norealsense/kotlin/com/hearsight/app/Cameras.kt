@@ -17,6 +17,7 @@ object Cameras {
 class RealSenseCamera : DepthSource {
     val intrinsicsSource = "n/a"
     val imuStatus = "n/a"
+    var wantColor = false
     fun isConnected() = false
     fun deviceName(): String? = null
     override fun start() {

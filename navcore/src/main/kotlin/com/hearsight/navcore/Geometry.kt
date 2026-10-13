@@ -22,21 +22,45 @@ class DepthImage(
     val gravityUp: DoubleArray? = null,
     /** Gyro-integrated rotation since the previous frame (row-major 3x3, previous <- current). */
     val gyroDelta: DoubleArray? = null,
+    /** Per-pixel labels for this frame, if segmentation ran on it synchronously. */
+    val semantics: SemanticImage? = null,
+    /** Colour image aligned to the depth image (RGB bytes, width x height), if streamed. */
+    val rgb: ByteArray? = null,
 )
 
-/** Packed xyz points: point i is (xyz[3i], xyz[3i+1], xyz[3i+2]). */
-class PointCloud(val xyz: FloatArray, val size: Int) {
+/**
+ * Packed xyz points: point i is (xyz[3i], xyz[3i+1], xyz[3i+2]). [pix] holds each point's
+ * source pixel (v * width + u) in an image of [srcWidth] x [srcHeight], so per-pixel labels
+ * can be attached later.
+ */
+class PointCloud(
+    val xyz: FloatArray,
+    val size: Int,
+    val pix: IntArray? = null,
+    val srcWidth: Int = 0,
+    val srcHeight: Int = 0,
+) {
     fun x(i: Int) = xyz[3 * i]
     fun y(i: Int) = xyz[3 * i + 1]
     fun z(i: Int) = xyz[3 * i + 2]
 
+    /** Label of point [i] in [sem], or UNKNOWN if pixel indices weren't recorded. */
+    fun label(i: Int, sem: SemanticImage): Surface {
+        val px = pix ?: return Surface.UNKNOWN
+        val k = px[i]
+        return sem.labelAt(k % srcWidth, k / srcWidth, srcWidth, srcHeight)
+    }
+
     fun subset(keep: (Int) -> Boolean): PointCloud {
         val out = FloatArray(xyz.size)
+        val outPix = pix?.let { IntArray(size) }
         var n = 0
         for (i in 0 until size) if (keep(i)) {
-            out[3 * n] = x(i); out[3 * n + 1] = y(i); out[3 * n + 2] = z(i); n++
+            out[3 * n] = x(i); out[3 * n + 1] = y(i); out[3 * n + 2] = z(i)
+            if (outPix != null) outPix[n] = pix!![i]
+            n++
         }
-        return PointCloud(out, n)
+        return PointCloud(out, n, outPix, srcWidth, srcHeight)
     }
 }
 
@@ -54,7 +78,9 @@ data class Plane(val nx: Double, val ny: Double, val nz: Double, val d: Double) 
 
 fun deproject(img: DepthImage, p: Params): PointCloud {
     val s = p.stride
-    val out = FloatArray(3 * ((img.width + s - 1) / s) * ((img.height + s - 1) / s))
+    val cap = ((img.width + s - 1) / s) * ((img.height + s - 1) / s)
+    val out = FloatArray(3 * cap)
+    val pix = IntArray(cap)
     var n = 0
     for (v in 0 until img.height step s) for (u in 0 until img.width step s) {
         val z = img.depth[v * img.width + u]
@@ -62,9 +88,10 @@ fun deproject(img: DepthImage, p: Params): PointCloud {
         out[3 * n] = (u - img.cx) / img.fx * z
         out[3 * n + 1] = (v - img.cy) / img.fy * z
         out[3 * n + 2] = z
+        pix[n] = v * img.width + u
         n++
     }
-    return PointCloud(out, n)
+    return PointCloud(out, n, pix, img.width, img.height)
 }
 
 /**

@@ -22,6 +22,10 @@ an obstacle/cost map, human-centred path planning and turn-by-turn haptic guidan
                                │ 2c. 3D map fused over time: voxels in   (navcore/FusedMap.kt)
                                │    world coordinates, free space from
                                │    the depth image, ~30 s memory
+   colour (outdoor mode) ─────►│ 2d. segmentation: SegFormer-B0 on the   (app/Segmenter.kt,
+                               │    aligned colour image, ~5 Hz, labels   navcore/Semantics.kt)
+                               │    road / sidewalk / grass / person /
+                               │    vehicle → fused into the map
                                │ 3. 2.5D grid: floor / obstacle /        (navcore/Grid.kt)
                                │    drop-off / unknown + safety margin
                                │ 4. Dijkstra → goal ahead → straight     (navcore/Planner.kt)
@@ -40,6 +44,7 @@ an obstacle/cost map, human-centred path planning and turn-by-turn haptic guidan
 | `app/src/realsense/` | Camera code, compiled only when `app/libs/librealsense.aar` exists |
 | `app/src/norealsense/` | Stub used without the AAR, so the app still builds and runs in demo mode |
 | `scripts/build_librealsense_aar.sh` | Builds Intel's Android wrapper from source |
+| `scripts/export_segmentation_model.py` | Exports the segmentation model to `app/src/main/assets/segmentation.onnx` |
 
 ## What you need
 
@@ -70,8 +75,19 @@ On some OnePlus models OTG switches itself off after 10 minutes of inactivity:
    and run again; the app now uses the camera. If Intel's wrapper doesn't build with the
    default tag, try another release tag as the first argument and see
    `doc/android.md` in the librealsense repository.
-4. **Plug in the camera.** Android asks to open HearSight for the RealSense: tick
-   *"Always open"*. Then press **Start guidance**.
+4. **Add the segmentation model (for outdoor use).** On a laptop with internet:
+   ```bash
+   python -m venv .venv && . .venv/bin/activate
+   pip install torch transformers onnx onnxruntime onnxscript
+   python scripts/export_segmentation_model.py
+   ```
+   This downloads SegFormer-B0 trained on Cityscapes (street scenes, 15 MB) from Hugging
+   Face, exports it to `app/src/main/assets/segmentation.onnx` and checks the ONNX output
+   against PyTorch. Rebuild the app. Without the file the app works the same, just
+   without road and person detection.
+5. **Plug in the camera.** Android asks to open HearSight for the RealSense: tick
+   *"Always open"*. Switch on **Outdoor** when you're outside, then press **Start
+   guidance**.
 
 Run the pipeline tests on any machine with JDK 17: `./gradlew :navcore:test` (the
 Android SDK must be installed, because Gradle configures the `app` module too).
@@ -171,8 +187,34 @@ depth frames stop arriving for more than 1 second.
    - **Planning:** the grid is sampled from this map, not from the current frame.
      `fuseMap = false` in `Params.kt` switches back to single-frame planning.
 
-The whole pipeline (floor, odometry, fused map, planning, guidance) takes about 13 ms per
-frame on a desktop JVM at 424x240. Expect roughly 30–50 ms on a recent phone.
+8. **Semantic segmentation (outdoor mode).**
+   - **Model:** SegFormer-B0 trained on Cityscapes, running on the D455's colour
+     camera. The colour image is aligned pixel for pixel to depth by librealsense.
+   - **Runtime:** ONNX Runtime on the phone, on its own thread, whenever it's free
+     (expect 100–250 ms per image, so about 5 updates a second). The depth loop never
+     waits for it.
+   - **Timing:** each label image goes back with its frame ID and is fused using that
+     frame's own points and pose, so labels never land on the wrong geometry. Labels
+     arriving more than 1 s late are dropped.
+   - **Classes:** the 19 Cityscapes classes become walkway, road, terrain, person,
+     vehicle, structure or sky. Floor-level points vote for each map column's ground
+     type; points above the floor vote for the obstacle type. Low-confidence pixels
+     (under 50%) are ignored.
+   - **What the planner does with it:**
+     - **Road:** extra cost per cell, so the planner stays on the sidewalk when it can.
+     - **Grass:** mild extra cost.
+     - **People:** 60 cm keep-out, instead of 30 cm around walls.
+     - **Vehicles:** 80 cm keep-out.
+   - **Speech:** "Person ahead", "Vehicle ahead", "Road ahead", and "Caution, path
+     crosses road" when the only route uses the road.
+   - **Safety:** labels never remove an obstacle; geometry still decides what's solid.
+   - **Map colours:** road amber, grass green, people yellow, vehicles orange.
+   - **Outdoor only:** Cityscapes has street scenes only, so the model runs only with
+     the **Outdoor** switch on. Indoors it would likely call the floor "road".
+
+The whole pipeline (floor, odometry, fused map, planning, guidance) takes about 15 ms per
+frame on a desktop JVM at 424x240. Expect roughly 30–50 ms on a recent phone, with
+segmentation running alongside on two other cores.
 
 ### D455 specifics
 
@@ -222,6 +264,9 @@ All thresholds are in `navcore/src/main/kotlin/com/hearsight/navcore/Params.kt`:
   view, it should still be on the map beside you, red, and the path should keep clear
   of it. Have someone step in front of the camera and walk away: they should vanish
   from the map within about half a second.
+  Outdoors, with the model added and **Outdoor** on: the status line shows `seg … ms`.
+  The road shows amber on the map and people yellow, and walking towards the road edge
+  says "Road ahead".
 - **Day 2:** mount the camera; walk indoor corridors and around furniture; tune
   `Params` (obstacle height, body radius, dead band) until the cues feel right.
 - **Day 3:** test steps, doorways and people walking past; blindfolded trials *with a
@@ -242,8 +287,11 @@ never rely on it instead of a cane or guide dog.
 - The camera can't see the ground right at the user's feet. Very low obstacles there,
   glass, mirrors and black surfaces can be missed (RealSense limits).
 - In bright sunlight the D4xx depth is noisier. Outdoor use needs more testing.
-- There is no semantic understanding yet: sidewalk, road and crosswalk all count as
-  "floor". Do not use near traffic.
+- Segmentation is a prototype too:
+  - Cityscapes was filmed from a car, not from a pedestrian's chest, so expect mistakes.
+  - There's no crosswalk class: a crossing is "road".
+  - It can't judge traffic or signals.
+  - **Never use this to decide when to cross a road.**
 - There is no destination: it follows the open space ahead, like the demo.
 
 ## Next steps
@@ -254,8 +302,8 @@ never rely on it instead of a cane or guide dog.
    help too.
 2. **Use the gyroscope for gravity too.** Fusing it with the accelerometer (a
    complementary filter) would keep the up direction accurate during fast head turns.
-3. **Recognise surfaces.** Run a TFLite segmentation model on the RealSense colour stream
-   (sidewalk / road / crosswalk / stairs) and add it as a cost layer.
+3. **Better segmentation.** Fine-tune on pedestrian-view data (e.g. Mapillary Vistas,
+   which has crosswalks and curbs) and add indoor classes so it can run everywhere.
 4. **Keep running with the screen off.** Move the navigation loop into a foreground
    service.
 5. **Build a haptic headband.** An ESP32 with 3–5 vibration motors over BLE would give

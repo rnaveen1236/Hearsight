@@ -48,5 +48,7 @@ kotlin {
 
 dependencies {
     implementation(project(":navcore"))
+    // Runs the segmentation model (app/src/main/assets/segmentation.onnx, see scripts/).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     if (hasRealSense) implementation(files(realsenseAar))
 }

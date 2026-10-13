@@ -4,13 +4,26 @@ import android.util.Log
 import com.hearsight.navcore.DepthSource
 import com.hearsight.navcore.Pipeline
 import com.hearsight.navcore.StepResult
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
-/** Runs camera -> navcore pipeline on a dedicated thread. */
+/**
+ * Runs camera -> navcore pipeline on a dedicated thread. If a [segmenter] is given, frames
+ * with colour are segmented on a second thread whenever it is free (the model is slower than
+ * the camera); labels go back to the pipeline with their frame id.
+ */
 class NavigationEngine(
     private val source: DepthSource,
     private val onResult: (StepResult) -> Unit,
     private val onError: (String) -> Unit,
+    private val segmenter: Segmenter? = null,
 ) {
+    private val segExecutor = segmenter?.let { Executors.newSingleThreadExecutor { r -> Thread(r, "hearsight-seg") } }
+    private val segBusy = AtomicBoolean(false)
+    /** Duration of the last segmentation, ms (0 if none yet). */
+    @Volatile var segMillis = 0.0
+        private set
     private val pipeline = Pipeline()
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -30,6 +43,8 @@ class NavigationEngine(
         running = false
         thread?.join(2000)
         thread = null
+        segExecutor?.shutdown()
+        segExecutor?.awaitTermination(1, TimeUnit.SECONDS)
     }
 
     private fun loop() {
@@ -56,10 +71,29 @@ class NavigationEngine(
                     continue
                 }
                 missed = 0
-                onResult(pipeline.step(img))
+                val result = pipeline.step(img)
+                segment(img.rgb, img.width, img.height, result.frameId)
+                onResult(result)
             }
         } finally {
             try { source.stop() } catch (t: Throwable) { Log.w(TAG, "camera stop failed", t) }
+        }
+    }
+
+    private fun segment(rgb: ByteArray?, w: Int, h: Int, frameId: Long) {
+        val seg = segmenter ?: return
+        val exec = segExecutor ?: return
+        if (rgb == null || !segBusy.compareAndSet(false, true)) return
+        exec.execute {
+            try {
+                val t0 = System.nanoTime()
+                pipeline.submitSemantics(frameId, seg.segment(rgb, w, h))
+                segMillis = (System.nanoTime() - t0) / 1e6
+            } catch (t: Throwable) {
+                Log.w(TAG, "segmentation failed", t)
+            } finally {
+                segBusy.set(false)
+            }
         }
     }
 

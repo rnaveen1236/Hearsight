@@ -35,6 +35,9 @@ object Cameras {
  * 424x240 depth @ 30 fps fits in USB 2.0 bandwidth too, so it works even on phones (or
  * cables) without USB 3. No colour stream: the pipeline only needs depth.
  *
+ * With a segmentation model, the colour stream (424x240 RGB) is enabled too and aligned to
+ * depth, so each depth pixel has a colour pixel for the model's labels.
+ *
  * On cameras with an IMU (D435i, D455) the accelerometer and gyroscope streams are enabled
  * too. The accelerometer is filtered into a gravity "up" vector (floor tilt); the gyroscope is
  * integrated into the rotation between depth frames (odometry prediction). Both are attached
@@ -101,43 +104,64 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
         null
     }
 
+    /** Stream colour (aligned to depth) for segmentation. Set before [start]. */
+    @Volatile var wantColor = false
+    private var colorEnabled = false
+    /** librealsense Align(DEPTH) processing block, via reflection (constructor varies by version). */
+    private val align: Any? by lazy {
+        try {
+            Class.forName("com.intel.realsense.librealsense.Align")
+                .getConstructor(StreamType::class.java).newInstance(StreamType.DEPTH)
+        } catch (t: Throwable) {
+            Log.w(TAG, "No Align block: colour can't be aligned to depth", t)
+            null
+        }
+    }
+    private var rgbRaw = ByteArray(0)
+
     override fun start() {
         gravity.reset()
         gyro.reset()
         intrinsics = null
-        // Most to least capable: accel + gyro at the D455's rates, accel + gyro at any rate,
-        // accel only, then depth only (a plain D435 has no IMU and refuses motion streams).
-        val attempts = listOf(
-            Triple(ACCEL_FPS, GYRO_FPS, "accel 63 Hz + gyro 200 Hz"),
+        // Most to least capable: (colour) + accel + gyro at the D455's rates, any rate, accel
+        // only, then depth only. A plain D435 has no IMU; a USB 2 link may refuse colour.
+        val imuAttempts = listOf(
+            Triple<Int?, Int?, String>(ACCEL_FPS, GYRO_FPS, "accel 63 Hz + gyro 200 Hz"),
             Triple(0, 0, "accel + gyro, any rate"),
             Triple(0, null, "accel only"),
+            Triple(null, null, "no IMU"),
         )
-        for ((accelFps, gyroFps, label) in attempts) {
+        val colorOptions = if (wantColor && align != null) listOf(true, false) else listOf(false)
+        var lastError: Throwable? = null
+        for (color in colorOptions) for ((accelFps, gyroFps, label) in imuAttempts) {
             try {
-                pipeline = startPipeline(accelFps, gyroFps)
-                imuEnabled = true
+                pipeline = startPipeline(accelFps, gyroFps, color)
+                imuEnabled = accelFps != null
                 gyroEnabled = gyroFps != null
-                Log.i(TAG, "Streaming depth + $label")
+                colorEnabled = color
+                Log.i(TAG, "Streaming depth + $label" + if (color) " + colour" else "")
                 return
             } catch (t: Throwable) {
-                Log.i(TAG, "Config '$label' refused: ${t.message}")
+                lastError = t
+                Log.i(TAG, "Config '$label', colour=$color refused: ${t.message}")
             }
         }
-        imuEnabled = false
-        gyroEnabled = false
-        pipeline = startPipeline(null, null)
+        throw IllegalStateException("RealSense refused every stream configuration", lastError)
     }
 
     /** Null fps = stream off, 0 = any rate. */
-    private fun startPipeline(accelFps: Int?, gyroFps: Int?): Pipeline {
+    private fun startPipeline(accelFps: Int?, gyroFps: Int?, color: Boolean): Pipeline {
         val pipe = Pipeline()
         try {
             Config().use { cfg ->
                 cfg.enableStream(StreamType.DEPTH, -1, WIDTH, HEIGHT, StreamFormat.Z16, FPS)
+                if (color) cfg.enableStream(StreamType.COLOR, -1, WIDTH, HEIGHT, StreamFormat.valueOf("RGB8"), FPS)
                 // Motion types looked up by name so this builds against wrapper versions without them.
-                val motion = StreamFormat.valueOf("MOTION_XYZ32F")
-                if (accelFps != null) cfg.enableStream(StreamType.valueOf("ACCEL"), -1, 0, 0, motion, accelFps)
-                if (gyroFps != null) cfg.enableStream(StreamType.valueOf("GYRO"), -1, 0, 0, motion, gyroFps)
+                if (accelFps != null || gyroFps != null) {
+                    val motion = StreamFormat.valueOf("MOTION_XYZ32F")
+                    if (accelFps != null) cfg.enableStream(StreamType.valueOf("ACCEL"), -1, 0, 0, motion, accelFps)
+                    if (gyroFps != null) cfg.enableStream(StreamType.valueOf("GYRO"), -1, 0, 0, motion, gyroFps)
+                }
                 pipe.start(cfg).close()
             }
         } catch (t: Throwable) {
@@ -156,7 +180,20 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
             pipe.waitForFrames(1000).use { frames ->
                 if (imuEnabled) firstOrNull(frames, StreamType.valueOf("ACCEL"))?.use { readAccel(it) }
                 if (gyroEnabled) firstOrNull(frames, StreamType.valueOf("GYRO"))?.use { readGyro(it) }
-                firstOrNull(frames, StreamType.DEPTH)?.use { return toDepthImage(it) }
+                val hasDepth = firstOrNull(frames, StreamType.DEPTH)?.also { it.close() } != null
+                if (!hasDepth) return@use
+                if (colorEnabled) {
+                    val hasColor = firstOrNull(frames, StreamType.COLOR)?.also { it.close() } != null
+                    if (hasColor) aligned(frames)?.use { set ->
+                        val color = firstOrNull(set, StreamType.COLOR)
+                        firstOrNull(set, StreamType.DEPTH)?.use { d ->
+                            val rgb = color?.use { readRgb(it) }
+                            return toDepthImage(d, rgb)
+                        }
+                        color?.close()
+                    }
+                }
+                firstOrNull(frames, StreamType.DEPTH)?.use { return toDepthImage(it, null) }
             }
         }
         return null
@@ -166,7 +203,30 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
     private fun firstOrNull(frames: FrameSet, type: StreamType): Frame? =
         try { frames.first(type) } catch (_: Exception) { null }
 
-    private fun toDepthImage(frame: Frame): DepthImage {
+    /** Colour re-projected to the depth camera's viewpoint and resolution (FrameSet.applyFilter(Align)). */
+    private fun aligned(frames: FrameSet): FrameSet? = try {
+        val a = align ?: return null
+        val apply = frames.javaClass.methods.first { it.name == "applyFilter" && it.parameterCount == 1 }
+        apply.invoke(frames, a) as FrameSet
+    } catch (t: Throwable) {
+        Log.w(TAG, "Align failed, continuing without colour", t)
+        colorEnabled = false
+        null
+    }
+
+    /** Packed RGB bytes of a colour frame (strips row padding). */
+    private fun readRgb(frame: Frame): ByteArray {
+        val video: VideoFrame = frame.`as`(Extension.VIDEO_FRAME)
+        val w = video.width; val h = video.height; val stride = video.stride
+        if (rgbRaw.size != stride * h) rgbRaw = ByteArray(stride * h)
+        video.getData(rgbRaw)
+        if (stride == w * 3) return rgbRaw.copyOf()
+        val out = ByteArray(w * h * 3)
+        for (v in 0 until h) System.arraycopy(rgbRaw, v * stride, out, v * w * 3, w * 3)
+        return out
+    }
+
+    private fun toDepthImage(frame: Frame, rgb: ByteArray?): DepthImage {
         // `as` wraps the same native frame; only the original is closed.
         val video: VideoFrame = frame.`as`(Extension.VIDEO_FRAME)
         val w = video.width
@@ -182,7 +242,11 @@ class RealSenseCamera(context: Context, private val onConnection: (Boolean) -> U
             depth[v * w + u] = (shorts.get(v * rowShorts + u).toInt() and 0xFFFF) * DEPTH_UNITS
         }
         val k = intrinsics ?: readIntrinsics(frame, w, h).also { intrinsics = it }
-        return DepthImage(w, h, depth, k[0], k[1], k[2], k[3], gravity.up(), if (gyroEnabled) gyro.take() else null)
+        val colour = rgb?.takeIf { it.size == w * h * 3 }  // aligned colour has depth's resolution
+        return DepthImage(
+            w, h, depth, k[0], k[1], k[2], k[3], gravity.up(), if (gyroEnabled) gyro.take() else null,
+            rgb = colour,
+        )
     }
 
     /**

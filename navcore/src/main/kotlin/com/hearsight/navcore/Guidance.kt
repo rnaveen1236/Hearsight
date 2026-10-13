@@ -58,8 +58,23 @@ class Guidance(private val p: Params, private val clock: () -> Double = { System
         var spoken: String? = null
         val drop = nearestAhead(grid, grid.dropoff)
         val obstacle = nearestAhead(grid, grid.obstacle)
+        val person = nearestAhead(grid, BooleanArray(grid.obstacle.size) { grid.obstacle[it] && grid.objectAt(it) == Surface.PERSON })
+        val vehicle = nearestAhead(grid, BooleanArray(grid.obstacle.size) { grid.obstacle[it] && grid.objectAt(it) == Surface.VEHICLE })
+        val road = nearestAhead(grid, BooleanArray(grid.ground.size) { grid.groundAt(it) == Surface.ROAD })
+        val pathOnRoad = plan.path.any { pt ->
+            val r = grid.rowOf(pt.fwd); val c = grid.colOf(pt.lat)
+            r in 0 until grid.rows && c in 0 until grid.cols && grid.groundAt(grid.idx(r, c)) == Surface.ROAD
+        }
         if (drop != null && drop < p.warnDist) {
             spoken = say("Step down ahead", now)
+        } else if (person != null && person < p.warnDist) {
+            spoken = say("Person ahead", now)
+        } else if (vehicle != null && vehicle < p.warnDist * 1.5) {
+            spoken = say("Vehicle ahead", now)
+        } else if (pathOnRoad) {
+            spoken = say("Caution, path crosses road", now)
+        } else if (road != null && road < p.roadWarnDist) {
+            spoken = say("Road ahead", now)
         } else if (obstacle != null && obstacle < p.warnDist && cmd == Command.STRAIGHT) {
             spoken = say(if (obstacle >= 1.0) "Obstacle, %.1f meters".format(obstacle) else "Obstacle close", now)
         }
