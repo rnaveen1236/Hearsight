@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0B0B0D"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/command"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:accessibilityLiveRegion="polite"
+        android:gravity="center"
+        android:text="READY"
+        android:textColor="#F4F4F5"
+        android:textSize="40sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/detail"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:minLines="1"
+        android:textColor="#A1A1AA"
+        android:textSize="16sp" />
+
+    <com.hearsight.app.MapView
+        android:id="@+id/map"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="12dp"
+        android:layout_weight="1"
+        android:contentDescription="@string/map_description" />
+
+    <TextView
+        android:id="@+id/status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textColor="#8A8A93"
+        android:textSize="13sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <CheckBox
+            android:id="@+id/optVibrate"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:checked="true"
+            android:text="@string/vibrate"
+            android:textColor="#F4F4F5" />
+
+        <CheckBox
+            android:id="@+id/optSpeech"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:checked="true"
+            android:text="@string/speech"
+            android:textColor="#F4F4F5" />
+
+        <CheckBox
+            android:id="@+id/optBeeps"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:checked="true"
+            android:text="@string/beeps"
+            android:textColor="#F4F4F5" />
+    </LinearLayout>
+
+    <Switch
+        android:id="@+id/demo"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:text="@string/demo"
+        android:textColor="#F4F4F5" />
+
+    <Button
+        android:id="@+id/start"
+        android:layout_width="match_parent"
+        android:layout_height="96dp"
+        android:layout_marginTop="8dp"
+        android:backgroundTint="#22C55E"
+        android:text="@string/start"
+        android:textColor="#000000"
+        android:textSize="24sp"
+        android:textStyle="bold" />
+</LinearLayout>

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Intel Corporation (0x8086): RealSense D4xx cameras -->
+    <usb-device vendor-id="32902" />
+</resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HearSight</string>
+    <string name="start">Start guidance</string>
+    <string name="stop">Stop guidance</string>
+    <string name="demo">Demo mode (simulated camera)</string>
+    <string name="vibrate">Vibrate</string>
+    <string name="speech">Speech</string>
+    <string name="beeps">Stereo beeps</string>
+    <string name="map_description">Live map of walkable floor, obstacles and planned path</string>
+</resources>

@@ -1,0 +1,11 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+# built from source by scripts/build_librealsense_aar.sh
+app/libs/*.aar
