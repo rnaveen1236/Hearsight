@@ -57,6 +57,24 @@ data class Params(
     val trailEvery: Int = 3,             // keep every n-th pose for the trail on the map
     val trailLength: Int = 40,
 
+    // --- 3D map fused over time (world frame, follows the user) ---
+    val fuseMap: Boolean = true,         // false = plan from the current frame only
+    val mapSize: Float = 8.0f,           // window width and depth, metres
+    val mapVoxel: Float = 0.10f,
+    val mapZMin: Float = -3.0f,          // vertical range relative to the camera's start height
+    val mapZMax: Float = 1.0f,
+    val mapRecenter: Double = 1.0,       // shift the window once the user is this far off-centre
+    val mapPointStep: Int = 2,           // integrate every n-th point
+    val mapHit: Float = 0.7f,            // log-odds per observation
+    val mapMiss: Float = 0.4f,           // log-odds per ray passing through (once per frame)
+    val mapMinLogOdds: Float = -2.0f,
+    val mapMaxLogOdds: Float = 3.5f,
+    val mapOccupied: Float = 1.2f,       // obstacle / drop-off threshold (about 2 observations)
+    val mapSeen: Float = 0.3f,           // floor threshold
+    val mapDecay: Float = 0.99923f,      // per frame: half-life of about 30 s at 30 fps
+    val mapClearMargin: Double = 0.05,   // a voxel is free if the camera sees this far (+2% of depth) past it
+    val mapNoReturnDist: Double = 3.0,   // pixels with no depth clear voxels nearer than this (slowly)
+
     // --- occupancy grid (ground-aligned, egocentric) ---
     val cell: Float = 0.10f,
     val rangeFwd: Float = 5.0f,

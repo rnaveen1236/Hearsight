@@ -61,11 +61,15 @@ class DepthInertialOdometry(private val p: Params = Params()) {
         pose = Rigid.IDENTITY
     }
 
-    fun update(img: DepthImage): OdometryResult {
+    /**
+     * [upHint]: "up" in camera coordinates to use for the world frame when the camera has no
+     * IMU (e.g. the floor normal). Only used on the first frame.
+     */
+    fun update(img: DepthImage, upHint: DoubleArray? = null): OdometryResult {
         val maps = VertexMaps.build(img, p.odomStride, p.odomMaxDepth)
         val k = key
         if (k == null) {
-            worldFromKey = Rigid(gravityAlignedRotation(img.gravityUp), DoubleArray(3))
+            worldFromKey = Rigid(gravityAlignedRotation(img.gravityUp ?: upHint), DoubleArray(3))
             key = maps
             keyFromPrev = Rigid.IDENTITY
             pose = worldFromKey

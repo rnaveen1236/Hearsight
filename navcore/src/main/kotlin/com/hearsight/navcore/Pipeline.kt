@@ -32,6 +32,7 @@ class Pipeline(val params: Params = Params()) {
     private val guidance = Guidance(params)
     private var lastGoal: Pt? = null
     private val odometry = DepthInertialOdometry(params)
+    val map = FusedMap(params)
     private val history = ArrayDeque<Rigid>()
     private var frame = 0L
 
@@ -48,12 +49,22 @@ class Pipeline(val params: Params = Params()) {
             raw != null -> FloorSource.VISION
             else -> FloorSource.NONE
         }
-        val grid = plane?.let { buildGrid(pts, it, params) }
+        // Odometry first: the fused map needs this frame's pose.
+        // Without an IMU, the floor normal defines "up" for the world frame (and the map's columns).
+        val odo = odometry.update(img, plane?.let { doubleArrayOf(it.nx, it.ny, it.nz) })
+        if (odo.tracking == Tracking.LOST) map.clear()  // pose jumped: the map would be misaligned
+        val grid = plane?.let {
+            if (params.fuseMap) {
+                map.integrate(img, pts, odo.pose, it)
+                map.toGrid(odo.pose, it)
+            } else {
+                buildGrid(pts, it, params)
+            }
+        }
         val pl = grid?.let { plan(it, params, lastGoal) } ?: Plan()
         lastGoal = pl.path.lastOrNull()
         val cue = guidance.update(pl, grid)
 
-        val odo = odometry.update(img)
         if (frame++ % params.trailEvery == 0L) {
             history.addLast(odo.pose)
             while (history.size > params.trailLength) history.removeFirst()

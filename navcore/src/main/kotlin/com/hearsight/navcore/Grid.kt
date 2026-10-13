@@ -59,6 +59,20 @@ fun buildGrid(pts: PointCloud, plane: Plane, p: Params): Grid {
     val dropoff = BooleanArray(n) { dropC[it] >= p.minPoints && dropC[it] > floorC[it] && !obstacle[it] }
     val floor = BooleanArray(n) { floorC[it] > 0 && !obstacle[it] && !dropoff[it] }
     val unknown = BooleanArray(n) { floorC[it] + obsC[it] + dropC[it] == 0 }
+    return finishGrid(rows, cols, p, obstacle, dropoff, floor, unknown)
+}
+
+/** Blind-zone handling, clearance and costs, shared by the per-frame grid and [FusedMap]. */
+internal fun finishGrid(
+    rows: Int,
+    cols: Int,
+    p: Params,
+    obstacle: BooleanArray,
+    dropoff: BooleanArray,
+    floor: BooleanArray,
+    unknown: BooleanArray,
+): Grid {
+    val n = rows * cols
 
     // The camera can't see the floor right at the user's feet. Treat the rows before the
     // first observation as free (the user has just walked over them) instead of unknown,

@@ -19,6 +19,9 @@ an obstacle/cost map, human-centred path planning and turn-by-turn haptic guidan
    gyroscope (D435i/D455) ────►│ 2b. odometry: gyro predicts rotation,   (navcore/Odometry.kt)
                                │    point-to-plane ICP refines it and
                                │    measures movement → pose + red trail
+                               │ 2c. 3D map fused over time: voxels in   (navcore/FusedMap.kt)
+                               │    world coordinates, free space from
+                               │    the depth image, ~30 s memory
                                │ 3. 2.5D grid: floor / obstacle /        (navcore/Grid.kt)
                                │    drop-off / unknown + safety margin
                                │ 4. Dijkstra → goal ahead → straight     (navcore/Planner.kt)
@@ -151,8 +154,25 @@ depth frames stop arriving for more than 1 second.
    map. In simulation: 0.1–0.6% position error and under 1° rotation error over 1.8–4 m
    walks, and 7% position error during a fast 60°/s head turn.
 
-Floor, grid, planning and guidance take about 5 ms per frame on a desktop JVM, and
-odometry about 6 ms more. Expect roughly 20–40 ms in total on a recent phone.
+7. **3D map fused over time.** Each frame is placed into an 8 × 8 m map that follows
+   the user, using the odometry pose:
+   - **Obstacles:** 3D voxels (10 cm), so overhangs and head-height obstacles keep
+     their height.
+   - **Floor and drop-offs:** tracked per map column.
+   - **Clearing:** every occupied voxel in view is checked against the current depth
+     image. If the camera now sees past it, it fades, so a person who walks away is
+     erased within about 0.4 s. Out-of-view voxels are remembered, so a box beside you
+     or behind you still blocks the path. When the lower part of a column is seen to be
+     empty, its out-of-view upper part goes too, so a departed person doesn't leave a
+     "ghost head" above the camera's view. A shelf above the view is kept, because
+     nothing was ever under it.
+   - **Forgetting:** everything fades with a 30 s half-life to forgive odometry drift.
+     The map is cleared when tracking is lost.
+   - **Planning:** the grid is sampled from this map, not from the current frame.
+     `fuseMap = false` in `Params.kt` switches back to single-frame planning.
+
+The whole pipeline (floor, odometry, fused map, planning, guidance) takes about 13 ms per
+frame on a desktop JVM at 424x240. Expect roughly 30–50 ms on a recent phone.
 
 ### D455 specifics
 
@@ -198,6 +218,10 @@ All thresholds are in `navcore/src/main/kotlin/com/hearsight/navcore/Params.kt`:
   positive, about +90° after a quarter turn. If it goes negative, the gyro axes are
   flipped: negate them in `RealSenseCamera.readGyro`. Walk 3 m in a furnished room:
   the status distance should read about 3 m, with the red trail behind you on the map.
+  Then check the map memory: walk slowly past a chair on your left. Once it's out of
+  view, it should still be on the map beside you, red, and the path should keep clear
+  of it. Have someone step in front of the camera and walk away: they should vanish
+  from the map within about half a second.
 - **Day 2:** mount the camera; walk indoor corridors and around furniture; tune
   `Params` (obstacle height, body radius, dead band) until the cues feel right.
 - **Day 3:** test steps, doorways and people walking past; blindfolded trials *with a
@@ -208,9 +232,10 @@ All thresholds are in `navcore/src/main/kotlin/com/hearsight/navcore/Params.kt`:
 This is a prototype, **not a safety device**. Always test with a sighted spotter, and
 never rely on it instead of a cane or guide dog.
 
-- The map is rebuilt every frame from what the camera sees right now. Odometry now
-  tracks the user's pose, but the map doesn't use it yet, so obstacles that leave the
-  field of view are forgotten.
+- The fused map is only as good as the odometry. Drift (corridors, long walks) shifts
+  remembered obstacles slightly; they fade after about 30 s. Black, glass and very shiny
+  objects return no depth: the map can't see them, and an object it saw earlier fades
+  if the camera later gets no return from it within 3 m.
 - Odometry relies on 3D structure. In a bare corridor or open hall it can't see forward
   motion (status shows `degenerate`) and under-counts distance. Turns are still
   tracked by the gyro. It also drifts slowly over long walks: there's no loop closure.
@@ -223,18 +248,15 @@ never rely on it instead of a cane or guide dog.
 
 ## Next steps
 
-1. **Remember the surroundings.** Use the odometry pose to fuse frames into a map that
-   persists when the camera looks away (a voxel or 2.5D height map in world
-   coordinates).
-2. **Better odometry in corridors.** Add a visual term from the D455's colour or
+1. **Better odometry in corridors.** Add a visual term from the D455's colour or
    infrared image (with the IR projector switched off or interleaved) so forward motion
    is measurable when the geometry is flat. A step counter from the accelerometer would
    help too.
-3. **Use the gyroscope for gravity too.** Fusing it with the accelerometer (a
+2. **Use the gyroscope for gravity too.** Fusing it with the accelerometer (a
    complementary filter) would keep the up direction accurate during fast head turns.
-4. **Recognise surfaces.** Run a TFLite segmentation model on the RealSense colour stream
+3. **Recognise surfaces.** Run a TFLite segmentation model on the RealSense colour stream
    (sidewalk / road / crosswalk / stairs) and add it as a cost layer.
-5. **Keep running with the screen off.** Move the navigation loop into a foreground
+4. **Keep running with the screen off.** Move the navigation loop into a foreground
    service.
-6. **Build a haptic headband.** An ESP32 with 3–5 vibration motors over BLE would give
+5. **Build a haptic headband.** An ESP32 with 3–5 vibration motors over BLE would give
    directional cues on the forehead, like the .lumen glasses.
