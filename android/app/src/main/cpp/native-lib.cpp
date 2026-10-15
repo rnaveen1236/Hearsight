@@ -37,6 +37,18 @@ std::atomic<bool> g_timingLogs(false);
 // Consecutive wait_for_frames timeouts before telemetry reports no_frames.
 constexpr int kNoFrameTimeouts = 2;
 
+// Depth auto-recovery: a UVC watchdog reset of the depth endpoint at stream
+// start can leave depth frames empty (0.2-0.5% valid pixels vs 54-81% in
+// normal scenes) while colour keeps flowing. Restart the pipeline when depth
+// stays below kDepthDeadFraction for kDepthDeadSeconds, at most once per
+// kDepthRestartCooldownSeconds so a scene with genuinely no depth can't loop.
+constexpr float kDepthDeadFraction = 0.02f;
+constexpr double kDepthDeadSeconds = 2.0;
+constexpr double kDepthRestartCooldownSeconds = 10.0;
+int g_streamFps = 30;
+bool g_imuEnabled = false;
+
+
 // adb shell setprop <name> <value>; empty -> default.
 static bool debugPropEnabled(const char* name, bool defaultValue) {
     char v[PROP_VALUE_MAX] = {0};
@@ -54,6 +66,30 @@ bool isCameraInitialized = false;
 // RealSense Global State
 std::unique_ptr<rs2::context> rs_ctx;
 std::unique_ptr<rs2::pipeline> rs_pipe;
+
+// Fraction of non-zero depth pixels on a 40x30 grid.
+static float depthValidFraction(const rs2::depth_frame& depth) {
+    const uint16_t* z = static_cast<const uint16_t*>(depth.get_data());
+    const int w = depth.get_width(), h = depth.get_height();
+    int valid = 0, total = 0;
+    for (int gy = 0; gy < 30; ++gy) {
+        const uint16_t* row = z + static_cast<size_t>((gy * h) / 30) * w;
+        for (int gx = 0; gx < 40; ++gx, ++total) {
+            if (row[(gx * w) / 40] != 0) ++valid;
+        }
+    }
+    return total ? static_cast<float>(valid) / total : 0.0f;
+}
+
+// (Re)creates rs_pipe streaming colour+depth at [rate] and updates g_rsDevice.
+static void startPipelineAt(int rate) {
+    rs_pipe = std::make_unique<rs2::pipeline>(*rs_ctx);
+    rs2::config cfg;
+    cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGBA8, rate);
+    cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, rate);
+    rs_pipe->start(cfg);
+    g_rsDevice = rs_pipe->get_active_profile().get_device();
+}
 ANativeWindow* nativeWindow = nullptr;
 ANativeWindow* depthNativeWindow = nullptr;
 std::atomic<bool> isStreaming(false);
@@ -187,24 +223,17 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
             if (requested == 15 || requested == 30 || requested == 60) fps = requested;
         }
 
-        auto startAt = [](int rate) {
-            rs_pipe = std::make_unique<rs2::pipeline>(*rs_ctx);
-            rs2::config cfg;
-            cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGBA8, rate);
-            cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, rate);
-            rs_pipe->start(cfg);
-        };
-
         try {
-            startAt(fps);
+            startPipelineAt(fps);
         } catch (const std::exception& e) {
             if (fps == 15) throw;
             LOGE("Start at %d fps failed (%s); falling back to 15 fps", fps, e.what());
             fps = 15;
-            startAt(fps);
+            startPipelineAt(fps);
         }
+        g_streamFps = fps;
+        g_imuEnabled = imuEnabled;
         LOGI("Streaming colour+depth 640x480 @ %d fps", fps);
-        g_rsDevice = rs_pipe->get_active_profile().get_device();
 
         // With the D455 IMU (HID) active, librealsense's background pollers
         // (global-time keeper get_xu(ctrl=1), thermal compensation
@@ -258,6 +287,12 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
             auto last_time = std::chrono::steady_clock::now();
             int frame_count = 0;
             int consecutive_timeouts = 0;
+
+            // Depth auto-recovery state (see kDepthDeadFraction).
+            auto depth_dead_since = std::chrono::steady_clock::time_point{};
+            bool depth_dead = false;
+            auto last_depth_restart = std::chrono::steady_clock::now() -
+                std::chrono::seconds(static_cast<int>(kDepthRestartCooldownSeconds));
             
             // Depth is NOT aligned to colour: full-frame rs2::align cost
             // 35-86 ms/frame on the CPU and capped the stream at ~10 fps.
@@ -295,6 +330,42 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                         
                         rs2::video_frame color_frame = frames.get_color_frame();
                         rs2::depth_frame depth_frame = frames.get_depth_frame();
+
+                        // --- DEPTH AUTO-RECOVERY ---
+                        if (depth_frame && color_frame) {
+                            auto now = std::chrono::steady_clock::now();
+                            if (depthValidFraction(depth_frame) < kDepthDeadFraction) {
+                                if (!depth_dead) {
+                                    depth_dead = true;
+                                    depth_dead_since = now;
+                                }
+                                double dead_s = std::chrono::duration<double>(now - depth_dead_since).count();
+                                double since_restart_s =
+                                    std::chrono::duration<double>(now - last_depth_restart).count();
+                                if (dead_s >= kDepthDeadSeconds &&
+                                    since_restart_s >= kDepthRestartCooldownSeconds) {
+                                    LOGE("Depth empty for %.1f s; restarting pipeline @ %d fps",
+                                         dead_s, g_streamFps);
+                                    last_depth_restart = now;
+                                    depth_dead = false;
+                                    g_imu.stop();
+                                    try {
+                                        rs_pipe->stop();
+                                        startPipelineAt(g_streamFps);
+                                        g_imuPending = g_imuEnabled;
+                                        calib_ready = false;
+                                        LOGI("Pipeline restarted (depth recovery)");
+                                    } catch (const std::exception& re) {
+                                        // Next attempt after the cooldown; the
+                                        // frame loop backs off on errors meanwhile.
+                                        LOGE("Depth recovery restart failed: %s", re.what());
+                                    }
+                                    continue;
+                                }
+                            } else {
+                                depth_dead = false;
+                            }
+                        }
 
                         if (!calib_ready && color_frame && depth_frame) {
                             auto cp = color_frame.get_profile().as<rs2::video_stream_profile>();
@@ -582,6 +653,8 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                         
                     } catch (const std::exception& e) {
                         LOGE("Frame loop exception: %s", e.what());
+                        // Avoid a tight loop if the pipeline is not running.
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
                         if (++consecutive_timeouts == kNoFrameTimeouts) {
                             // Camera stopped delivering (unplugged or USB stall).
                             std::lock_guard<std::mutex> lock(telemetry_mutex);
