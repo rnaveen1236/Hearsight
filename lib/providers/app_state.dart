@@ -40,6 +40,10 @@ class AppState extends ChangeNotifier {
   String get usbStatus => _usbStatus;
   bool get isCameraConnected => _usbStatus == "CONNECTED";
 
+  // Pipeline problem to show in the UI (start failure or no frames), or null.
+  String? _streamError;
+  String? get streamError => _streamError;
+
   // Stage Config
   StageConfig _stageConfig = StageConfig(currentStage: PipelineStage.stage1);
   StageConfig get stageConfig => _stageConfig;
@@ -82,6 +86,12 @@ class AppState extends ChangeNotifier {
   void _startListeningToUsbStatus() {
     _usbStatusChannel.receiveBroadcastStream().listen((dynamic event) {
       _usbStatus = event.toString();
+      // Native side stops the pipeline on detach; mirror that here.
+      if (_usbStatus != "CONNECTED" && _isPipelineRunning) {
+        _isPipelineRunning = false;
+        _detections = [];
+        _streamError = "Camera disconnected";
+      }
       notifyListeners();
     }, onError: (dynamic error) {
       debugPrint("USB Status error: $error");
@@ -103,6 +113,16 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Use the current orientation as level (phone IMU mount offset).
+  Future<void> zeroImu() async {
+    if (kIsWeb) return;
+    try {
+      await _commandChannel.invokeMethod('zeroImu');
+    } on PlatformException catch (e) {
+      debugPrint("Failed to zero IMU: '${e.message}'.");
+    }
+  }
+
   void togglePipeline() async {
     if (_isPipelineRunning) {
       if (kIsWeb) {
@@ -117,6 +137,7 @@ class AppState extends ChangeNotifier {
       _isPipelineRunning = false;
     } else {
       _isPipelineRunning = true;
+      _streamError = null;
       if (kIsWeb) {
         _startWebMock();
       } else {
@@ -126,6 +147,7 @@ class AppState extends ChangeNotifier {
         } on PlatformException catch (e) {
           debugPrint("Failed to start pipeline: '${e.message}'.");
           _isPipelineRunning = false;
+          _streamError = "Start failed: ${e.message ?? e.code}";
         }
       }
     }
@@ -167,6 +189,14 @@ class AppState extends ChangeNotifier {
       if (!_isPipelineRunning) return;
       try {
         final Map<String, dynamic> data = jsonDecode(event as String);
+        if (data['status'] == 'no_frames') {
+          _streamError = "No frames from camera";
+          _detections = [];
+          _telemetry = TelemetryData(imu: _telemetry.imu);
+          notifyListeners();
+          return;
+        }
+        _streamError = null;
         _telemetry = TelemetryData(
           fps: (data['fps'] as num?)?.toDouble() ?? 0.0,
           p50LatencyMs: (data['p50'] as num?)?.toDouble() ?? 0.0,

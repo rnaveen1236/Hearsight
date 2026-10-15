@@ -18,6 +18,7 @@ class DetectionResult {
 /// (pitch > 0: camera tilted up, roll > 0: rolled clockwise from behind).
 class ImuData {
   final bool running;
+  final String source;      // "phone" or "d455"
   final double pitchDeg;
   final double rollDeg;
   final List<double> gyro;  // rad/s, IMU frame (x right, y down, z forward)
@@ -27,6 +28,7 @@ class ImuData {
 
   const ImuData({
     this.running = false,
+    this.source = '',
     this.pitchDeg = 0.0,
     this.rollDeg = 0.0,
     this.gyro = const [0.0, 0.0, 0.0],
@@ -40,6 +42,7 @@ class ImuData {
         (v as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ?? const [0.0, 0.0, 0.0];
     return ImuData(
       running: j['running'] as bool? ?? false,
+      source: j['source'] as String? ?? '',
       pitchDeg: (j['pitch'] as num?)?.toDouble() ?? 0.0,
       rollDeg: (j['roll'] as num?)?.toDouble() ?? 0.0,
       gyro: vec(j['gyro']),

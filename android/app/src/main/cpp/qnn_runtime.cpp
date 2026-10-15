@@ -409,50 +409,6 @@ bool QnnRuntime::loadQnnLibraries() {
 }
 
 
-bool QnnRuntime::loadModelLibrary() {
-    if (modelLib_) {
-        return true;
-    }
-
-    if (modelLibraryPath_.empty()) {
-        return setError("Model library path is empty");
-    }
-
-    modelLib_ = dlopen(
-        modelLibraryPath_.c_str(),
-        RTLD_NOW | RTLD_LOCAL);
-
-    if (!modelLib_) {
-        return setError(
-            "Failed to load model library: " +
-            modelLibraryPath_);
-    }
-
-    composeGraphs_ =
-        reinterpret_cast<ComposeGraphsFn>(
-            dlsym(
-                modelLib_,
-                "QnnModel_composeGraphs"));
-
-    freeGraphsInfo_ =
-        reinterpret_cast<FreeGraphsInfoFn>(
-            dlsym(
-                modelLib_,
-                "QnnModel_freeGraphsInfo"));
-
-    if (!composeGraphs_ || !freeGraphsInfo_) {
-        return setError(
-            "Required QnnModel compose/free symbols not found");
-    }
-
-    modelLoaded_ = true;
-
-    LOGI("QNN model library loaded");
-
-    return true;
-}
-
-
 bool QnnRuntime::loadQnnInterface() {
     const QnnInterface_t** providers = nullptr;
     uint32_t numProviders = 0;
@@ -982,13 +938,11 @@ bool QnnRuntime::setupOutputTensor() {
 
 bool QnnRuntime::initialize(
         const std::string& contextBinaryPath,
-        const std::string& modelLibraryPath,
         const std::string& nativeLibDir) {
 
     shutdown();
 
     contextBinaryPath_ = contextBinaryPath;
-    modelLibraryPath_ = modelLibraryPath;
     lastError_.clear();
 
     // Set ADSP_LIBRARY_PATH so the FastRPC/ADSP loader can find
@@ -1145,44 +1099,6 @@ bool QnnRuntime::execute(
 
 
 void QnnRuntime::cleanupModel() {
-    if (graphsInfo_) {
-        for (uint32_t i = 0; i < graphsCount_; ++i) {
-            if (!graphsInfo_[i]) {
-                continue;
-            }
-
-            qnn_runtime_api::GraphInfo_t* graph =
-                graphsInfo_[i];
-
-            for (uint32_t j = 0;
-                 j < graph->numInputTensors;
-                 ++j) {
-                freeTensorMetadata(
-                    graph->inputTensors[j]);
-            }
-
-            for (uint32_t j = 0;
-                 j < graph->numOutputTensors;
-                 ++j) {
-                freeTensorMetadata(
-                    graph->outputTensors[j]);
-            }
-        }
-
-        if (freeGraphsInfo_) {
-            // FIX (Issue 2a): freeGraphsInfo_ expects
-            // GraphInfo_t*** (GraphInfoPtr_t**) so it can null out
-            // the caller's pointer internally. Pass the address of
-            // graphsInfo_, not graphsInfo_ itself.
-            freeGraphsInfo_(
-                &graphsInfo_,
-                graphsCount_);
-        }
-
-        graphsInfo_ = nullptr;
-        graphsCount_ = 0;
-    }
-
     freeTensorMetadata(inputTensor_);
 
     for (Qnn_Tensor_t& tensor : outputTensors_) {
@@ -1197,17 +1113,6 @@ void QnnRuntime::cleanupModel() {
         &inputTensor_,
         0,
         sizeof(inputTensor_));
-
-
-    composeGraphs_ = nullptr;
-    freeGraphsInfo_ = nullptr;
-
-    if (modelLib_) {
-        dlclose(modelLib_);
-        modelLib_ = nullptr;
-    }
-
-    modelLoaded_ = false;
 }
 
 

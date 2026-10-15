@@ -12,6 +12,7 @@
 #include <android/asset_manager_jni.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 #include "qnn_runtime.h"
@@ -24,11 +25,17 @@ YoloDetector g_detector;
 std::mutex g_qnnMutex;
 std::atomic<bool> g_qnnInitialized(false);
 ImuStreamer g_imu;
+rs2::device g_rsDevice;  // the pipeline's active device (shared with the IMU)
 // IMU start is deferred until the colour/depth stream is flowing; see the
 // stream thread. Starting the D455 motion sensor at pipeline start wedged
 // the camera's USB control endpoint (EPROTO storm, no frames) on rsusb.
 std::atomic<bool> g_imuPending(false);
 constexpr int kImuStartAfterFrames = 30;
+// Per-second timing and per-frame E2E logs; off by default because they
+// exhaust the per-app log quota. Enable: adb shell setprop debug.hsv2.timing 1
+std::atomic<bool> g_timingLogs(false);
+// Consecutive wait_for_frames timeouts before telemetry reports no_frames.
+constexpr int kNoFrameTimeouts = 2;
 
 // adb shell setprop <name> <value>; empty -> default.
 static bool debugPropEnabled(const char* name, bool defaultValue) {
@@ -65,58 +72,35 @@ Java_com_hsv2_hsv2_1lite_MainActivity_initQnn(
     JNIEnv* env,
     jobject thiz,
     jstring contextBinaryPath,
-    jstring modelLibraryPath,
     jstring nativeLibDir)
 {
     (void)thiz;
 
-    if (contextBinaryPath == nullptr || modelLibraryPath == nullptr ||
-        nativeLibDir == nullptr) {
+    if (contextBinaryPath == nullptr || nativeLibDir == nullptr) {
         LOGE("QNN init: null path argument");
         return JNI_FALSE;
     }
 
-    const char* contextPath =
-        env->GetStringUTFChars(contextBinaryPath, nullptr);
+    const char* contextPath = env->GetStringUTFChars(contextBinaryPath, nullptr);
+    const char* libDir = env->GetStringUTFChars(nativeLibDir, nullptr);
 
-    const char* modelPath =
-        env->GetStringUTFChars(modelLibraryPath, nullptr);
-
-    if (contextPath == nullptr || modelPath == nullptr) {
+    if (contextPath == nullptr || libDir == nullptr) {
         LOGE("QNN init: failed to read Java string arguments");
-
-        if (contextPath != nullptr) {
-            env->ReleaseStringUTFChars(
-                contextBinaryPath, contextPath);
-        }
-
-        if (modelPath != nullptr) {
-            env->ReleaseStringUTFChars(
-                modelLibraryPath, modelPath);
-        }
-
+        if (contextPath) env->ReleaseStringUTFChars(contextBinaryPath, contextPath);
+        if (libDir) env->ReleaseStringUTFChars(nativeLibDir, libDir);
         return JNI_FALSE;
     }
 
     LOGI("========================================");
     LOGI("JNI initQnn() called");
     LOGI("QNN context: %s", contextPath);
-    LOGI("QNN model: %s", modelPath);
-
-    const char* libDir =
-        env->GetStringUTFChars(nativeLibDir, nullptr);
-
-    LOGI("Native lib dir: %s", libDir ? libDir : "(null)");
+    LOGI("Native lib dir: %s", libDir);
 
     std::lock_guard<std::mutex> qnnLock(g_qnnMutex);
 
     g_qnnInitialized = false;
 
-    bool success =
-        g_qnnRuntime.initialize(
-            contextPath,
-            modelPath,
-            libDir ? libDir : "");
+    bool success = g_qnnRuntime.initialize(contextPath, libDir);
 
     if (success) {
         std::string detectorError;
@@ -125,10 +109,6 @@ Java_com_hsv2_hsv2_1lite_MainActivity_initQnn(
         if (!success) {
             LOGE("YOLO detector setup failed: %s", detectorError.c_str());
         }
-    }
-
-    if (libDir != nullptr) {
-        env->ReleaseStringUTFChars(nativeLibDir, libDir);
     }
 
     g_qnnInitialized = success;
@@ -140,11 +120,8 @@ Java_com_hsv2_hsv2_1lite_MainActivity_initQnn(
              g_qnnRuntime.getLastError().c_str());
     }
 
-    env->ReleaseStringUTFChars(
-        contextBinaryPath, contextPath);
-
-    env->ReleaseStringUTFChars(
-        modelLibraryPath, modelPath);
+    env->ReleaseStringUTFChars(contextBinaryPath, contextPath);
+    env->ReleaseStringUTFChars(nativeLibDir, libDir);
 
     LOGI("========================================");
 
@@ -183,45 +160,92 @@ Java_com_hsv2_hsv2_1lite_MainActivity_initRealSenseWithFD(
 
 
 
-extern "C" JNIEXPORT void JNICALL
+// Returns "" on success, otherwise an error message for the UI.
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
         JNIEnv* env,
         jobject /* this */) {
-    if (isStreaming || !rs_ctx) return;
-    
-    try {
-        const bool imuEnabled = debugPropEnabled("debug.hsv2.imu", true);
+    if (isStreaming) return env->NewStringUTF("");
+    if (!rs_ctx) return env->NewStringUTF("RealSense camera not initialised");
 
-        // Optional: disable the global-time keeper (polls the camera over the
-        // USB control endpoint). Off by default; setprop debug.hsv2.globaltime 0.
-        if (imuEnabled && !debugPropEnabled("debug.hsv2.globaltime", true)) {
+    try {
+        g_timingLogs = debugPropEnabled("debug.hsv2.timing", false);
+
+        // D455 IMU is off by default: starting the motion sensor stops the
+        // camera (all endpoints fail ~1 s later; suspected power/firmware).
+        // Enable for testing with: adb shell setprop debug.hsv2.imu 1
+        const bool imuEnabled = debugPropEnabled("debug.hsv2.imu", false);
+
+        // Stream rate: 30 fps by default (app processing p99 ~24 ms fits the
+        // 33 ms budget). Override: adb shell setprop debug.hsv2.fps 15|30|60.
+        // Falls back to 15 fps if the camera/USB link refuses the higher rate.
+        int fps = 30;
+        {
+            char v[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.hsv2.fps", v);
+            int requested = atoi(v);
+            if (requested == 15 || requested == 30 || requested == 60) fps = requested;
+        }
+
+        auto startAt = [](int rate) {
+            rs_pipe = std::make_unique<rs2::pipeline>(*rs_ctx);
+            rs2::config cfg;
+            cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGBA8, rate);
+            cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, rate);
+            rs_pipe->start(cfg);
+        };
+
+        try {
+            startAt(fps);
+        } catch (const std::exception& e) {
+            if (fps == 15) throw;
+            LOGE("Start at %d fps failed (%s); falling back to 15 fps", fps, e.what());
+            fps = 15;
+            startAt(fps);
+        }
+        LOGI("Streaming colour+depth 640x480 @ %d fps", fps);
+        g_rsDevice = rs_pipe->get_active_profile().get_device();
+
+        // With the D455 IMU (HID) active, librealsense's background pollers
+        // (global-time keeper get_xu(ctrl=1), thermal compensation
+        // get_xu(id=15)) share the camera's USB control endpoint with the
+        // HID traffic; on rsusb that wedged the endpoint (EPROTO) and the
+        // video streams died. Turn both pollers off in IMU mode.
+        // Keep global time with: adb shell setprop debug.hsv2.globaltime 1
+        if (imuEnabled) {
+            const bool keepGlobalTime = debugPropEnabled("debug.hsv2.globaltime", false);
             try {
-                for (auto&& dev : rs_ctx->query_devices()) {
-                    for (auto&& sensor : dev.query_sensors()) {
-                        if (sensor.supports(RS2_OPTION_GLOBAL_TIME_ENABLED)) {
+                // Same device object the pipeline (and the IMU) use: each
+                // query_devices() call creates a new instance with its own options.
+                {
+                    for (auto&& sensor : g_rsDevice.query_sensors()) {
+                        if (!keepGlobalTime && sensor.supports(RS2_OPTION_GLOBAL_TIME_ENABLED)) {
                             sensor.set_option(RS2_OPTION_GLOBAL_TIME_ENABLED, 0.0f);
                         }
+                        if (sensor.supports(RS2_OPTION_THERMAL_COMPENSATION)) {
+                            sensor.set_option(RS2_OPTION_THERMAL_COMPENSATION, 0.0f);
+                        }
+                        LOGI("  %s: global_time=%s thermal_comp=%s",
+                             sensor.get_info(RS2_CAMERA_INFO_NAME),
+                             sensor.supports(RS2_OPTION_GLOBAL_TIME_ENABLED)
+                                 ? (sensor.get_option(RS2_OPTION_GLOBAL_TIME_ENABLED) ? "1" : "0") : "-",
+                             sensor.supports(RS2_OPTION_THERMAL_COMPENSATION)
+                                 ? (sensor.get_option(RS2_OPTION_THERMAL_COMPENSATION) ? "1" : "0") : "-");
                     }
                 }
-                LOGI("Global time disabled on all sensors (IMU mode)");
+                LOGI("IMU mode: background pollers off (global time %s, thermal compensation off)",
+                     keepGlobalTime ? "kept" : "off");
             } catch (const rs2::error& e) {
-                LOGE("Could not disable global time: %s", e.what());
+                LOGE("Could not disable background pollers: %s", e.what());
             }
         }
 
-        rs_pipe = std::make_unique<rs2::pipeline>(*rs_ctx);
-        rs2::config cfg;
-        // Lower framerate to 15 FPS to prevent USB bandwidth saturation on Android OTG
-        cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGBA8, 15);
-        cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 15);
-        rs_pipe->start(cfg);
 
         // D455 IMU runs on its own sensor/callback, outside the pipeline.
         // Started from the stream thread once frames are flowing.
-        // Disable for A/B tests with: adb shell setprop debug.hsv2.imu 0
         g_imuPending = imuEnabled;
         if (!imuEnabled) {
-            LOGI("IMU disabled by debug.hsv2.imu=0");
+            LOGI("IMU off (enable with setprop debug.hsv2.imu 1)");
         }
 
         isStreaming = true;
@@ -233,6 +257,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
             
             auto last_time = std::chrono::steady_clock::now();
             int frame_count = 0;
+            int consecutive_timeouts = 0;
             
             // Depth is NOT aligned to colour: full-frame rs2::align cost
             // 35-86 ms/frame on the CPU and capped the stream at ~10 fps.
@@ -258,6 +283,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                     try {
                         auto t_wait = std::chrono::steady_clock::now();
                         rs2::frameset frames = rs_pipe->wait_for_frames(5000); // 5s timeout
+                        consecutive_timeouts = 0;
                         stats_wait_sum += std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t_wait).count();
                         // Per-frame end-to-end timing (system clock, ms).
@@ -343,7 +369,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                         // Latency Measurement (Camera-to-Frame-Available)
                         double frame_timestamp_ms = color_frame.get_timestamp();
                         static bool domain_logged = false;
-                        if (!domain_logged) {
+                        if (!domain_logged && g_timingLogs) {
                             LOGI("E2E: color timestamp domain = %s",
                                  rs2_timestamp_domain_to_string(color_frame.get_frame_timestamp_domain()));
                             domain_logged = true;
@@ -363,9 +389,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 g_imuPending = false;
                                 frames_since_start = 0;
                                 std::string imuError;
-                                // Device handle from the context, as in the working MediaPipe build.
-                                auto devs = rs_ctx->query_devices();
-                                if (devs.size() > 0 && g_imu.start(devs.front(), imuError)) {
+                                if (g_imu.start(g_rsDevice, imuError)) {
                                     LOGI("IMU started after %d frames", kImuStartAfterFrames);
                                 } else {
                                     LOGE("IMU not started: %s", imuError.c_str());
@@ -414,6 +438,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
 
                             auto stats_now = std::chrono::steady_clock::now();
                             if (stats_now - stats_start >= std::chrono::seconds(1)) {
+                              if (g_timingLogs) {
                                 LOGI("Inference: %d frames | NPU avg %.1f ms max %.1f | "
                                      "pre+NPU+post avg %.1f ms max %.1f | %.1f dets/frame | fps %.1f",
                                      stats_frames,
@@ -434,6 +459,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 LOGI("Loop: wait %.1f ms | render %.1f ms",
                                      stats_wait_sum / stats_frames,
                                      stats_render_sum / stats_frames);
+                              }
                                 stats_wait_sum = stats_render_sum = 0.0;
                                 stats_start = stats_now;
                                 stats_frames = 0;
@@ -532,7 +558,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
 
                                 std::lock_guard<std::mutex> lock(telemetry_mutex);
                                 snprintf(telemetry_json, sizeof(telemetry_json),
-                                         "{\"fps\": %.1f, \"p50\": %.1f, \"p95\": 35.0, \"p99\": 45.0, "
+                                         "{\"status\": \"streaming\", \"fps\": %.1f, \"p50\": %.1f, \"p95\": 35.0, \"p99\": 45.0, "
                                          "\"cpu\": 30.0, \"gpu\": 15.0, \"npu\": 5.0, \"thermal\": 38.0, "
                                          "\"battery\": 100.0, \"centerDistance\": %.2f, \"droppedFrames\": %d, "
                                          "\"inferenceMs\": %.1f, \"imu\": %s, \"detections\": %s}",
@@ -546,7 +572,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
 
                                 // E2E,frame,capture->arrive,infer,render,arrive->post,capture->post,dets,depth
                                 double t_post_ms = e2e_now_ms();
-                                LOGI("E2E,%llu,%.2f,%.2f,%.2f,%.2f,%.2f,%zu,%.2f",
+                                if (g_timingLogs) LOGI("E2E,%llu,%.2f,%.2f,%.2f,%.2f,%.2f,%zu,%.2f",
                                      static_cast<unsigned long long>(current_frame_num),
                                      t_arrive_ms - frame_timestamp_ms, inference_ms, render_ms,
                                      t_post_ms - t_arrive_ms, t_post_ms - frame_timestamp_ms,
@@ -556,6 +582,13 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                         
                     } catch (const std::exception& e) {
                         LOGE("Frame loop exception: %s", e.what());
+                        if (++consecutive_timeouts == kNoFrameTimeouts) {
+                            // Camera stopped delivering (unplugged or USB stall).
+                            std::lock_guard<std::mutex> lock(telemetry_mutex);
+                            snprintf(telemetry_json, sizeof(telemetry_json),
+                                     "{\"status\": \"no_frames\", \"fps\": 0.0, \"detections\": []}");
+                            current_fps = 0.0;
+                        }
                     }
                 }
             }
@@ -564,7 +597,10 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
         
     } catch (const std::exception& e) {
         LOGE("Failed to start pipeline: %s", e.what());
+        rs_pipe.reset();
+        return env->NewStringUTF(e.what());
     }
+    return env->NewStringUTF("");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -587,6 +623,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_stopPipeline(
         } catch (...) {}
         rs_pipe.reset();
     }
+    g_rsDevice = rs2::device();
 }
 
 extern "C" JNIEXPORT void JNICALL

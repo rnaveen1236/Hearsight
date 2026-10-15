@@ -14,40 +14,6 @@
 #include "QnnTypes.h"
 #include "QnnSystemInterface.h"
 
-namespace qnn_runtime_api {
-
-enum ModelError_t {
-    MODEL_NO_ERROR               = 0,
-    MODEL_TENSOR_ERROR           = 1,
-    MODEL_PARAMS_ERROR           = 2,
-    MODEL_NODES_ERROR            = 3,
-    MODEL_GRAPH_ERROR            = 4,
-    MODEL_CONTEXT_ERROR          = 5,
-    MODEL_GENERATION_ERROR       = 6,
-    MODEL_SETUP_ERROR            = 7,
-    MODEL_INVALID_ARGUMENT_ERROR = 8,
-    MODEL_FILE_ERROR             = 9,
-    MODEL_MEMORY_ALLOCATE_ERROR  = 10,
-    MODEL_UNKNOWN_ERROR          = 0x7FFFFFFF
-};
-
-struct GraphInfo_t {
-    Qnn_GraphHandle_t graph;
-    char* graphName;
-    Qnn_Tensor_t* inputTensors;
-    uint32_t numInputTensors;
-    Qnn_Tensor_t* outputTensors;
-    uint32_t numOutputTensors;
-};
-
-using GraphInfoPtr_t = GraphInfo_t*;
-
-struct GraphConfigInfo_t {
-    char* graphName;
-    const QnnGraph_Config_t** graphConfigs;
-};
-
-}  // namespace qnn_runtime_api
 
 
 // Shape and quantization of a graph input/output.
@@ -67,7 +33,6 @@ public:
 
     bool initialize(
         const std::string& contextBinaryPath,
-        const std::string& modelLibraryPath,
         const std::string& nativeLibDir
     );
 
@@ -93,7 +58,6 @@ public:
 
 private:
     bool loadQnnLibraries();
-    bool loadModelLibrary();
     bool loadQnnInterface();
     bool loadQnnSystemInterface();
 
@@ -128,7 +92,6 @@ private:
     void* qnnHtpLib_{nullptr};
     void* qnnHtpPrepareLib_{nullptr};
     void* qnnSystemLib_{nullptr};
-    void* modelLib_{nullptr};
 
     using QnnInterfaceGetProvidersFn =
         Qnn_ErrorHandle_t (*)(
@@ -145,32 +108,6 @@ private:
     QnnInterfaceGetProvidersFn qnnInterfaceGetProviders_{nullptr};
     QnnSystemInterfaceGetProvidersFn qnnSystemInterfaceGetProviders_{nullptr};
 
-    using ComposeGraphsFn =
-        qnn_runtime_api::ModelError_t (*)(
-            Qnn_BackendHandle_t backendHandle,
-            QNN_INTERFACE_VER_TYPE interface,
-            Qnn_ContextHandle_t contextHandle,
-            const qnn_runtime_api::GraphConfigInfo_t** graphsConfigInfo,
-            uint32_t numGraphsConfigInfo,
-            qnn_runtime_api::GraphInfoPtr_t** graphsInfo,
-            uint32_t* numGraphsInfo,
-            bool debug,
-            QnnLog_Callback_t logCallback,
-            QnnLog_Level_t maxLogLevel
-        );
-
-    using FreeGraphsInfoFn =
-        qnn_runtime_api::ModelError_t (*)(
-            qnn_runtime_api::GraphInfoPtr_t** graphsInfo,
-            uint32_t numGraphsInfo
-        );
-
-    ComposeGraphsFn composeGraphs_{nullptr};
-    FreeGraphsInfoFn freeGraphsInfo_{nullptr};
-
-    qnn_runtime_api::GraphInfoPtr_t* graphsInfo_{nullptr};
-    uint32_t graphsCount_{0};
-
     Qnn_Tensor_t inputTensor_{};
     std::vector<Qnn_Tensor_t> outputTensors_;
 
@@ -179,10 +116,8 @@ private:
     double lastExecuteMs_{0.0};
 
     std::string contextBinaryPath_;
-    std::string modelLibraryPath_;
 
     bool qnnLoaded_{false};
-    bool modelLoaded_{false};
     bool backendInitialized_{false};
     bool contextInitialized_{false};
     bool graphInitialized_{false};

@@ -120,11 +120,15 @@ class _HomeScreenState extends State<HomeScreen> {
                                         constraints.biggest,
                                         MediaQuery.of(context).padding.top,
                                       ),
-                                    // D455 IMU panel (top-right, below the status bar)
+                                    // IMU panel (bottom-right of the RGB view, clear of labels)
                                     Positioned(
-                                      top: MediaQuery.of(context).padding.top + 8,
+                                      bottom: 8,
                                       right: 8,
-                                      child: _imuPanel(state.telemetry.imu),
+                                      // Tap to zero (level the mount offset).
+                                      child: GestureDetector(
+                                        onTap: () => context.read<AppState>().zeroImu(),
+                                        child: _imuPanel(state.telemetry.imu),
+                                      ),
                                     ),
                                     // Center Crosshair and HUD aligned to RGB Feed
                                     Center(
@@ -234,6 +238,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text('FPS: ${state.telemetry.fps.toStringAsFixed(1)} | Latency: ${state.telemetry.p95LatencyMs.toStringAsFixed(1)}ms', style: const TextStyle(color: Colors.white70)),
+                      if (state.streamError != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(state.streamError!, style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+                        ),
                     ],
                   ),
                   
@@ -280,10 +289,11 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text('IMU  pitch ${imu.pitchDeg.toStringAsFixed(1)}°  roll ${imu.rollDeg.toStringAsFixed(1)}°',
+                Text('IMU${imu.source.isNotEmpty ? ' (${imu.source})' : ''}  pitch ${imu.pitchDeg.toStringAsFixed(1)}°  roll ${imu.rollDeg.toStringAsFixed(1)}°',
                     style: style.copyWith(color: Colors.cyanAccent, fontWeight: FontWeight.bold)),
                 Text('gyro ${imu.gyroHz.toStringAsFixed(0)} Hz  accel ${imu.accelHz.toStringAsFixed(0)} Hz', style: style),
                 Text('|g| ${_norm(imu.accel).toStringAsFixed(2)} m/s²  |ω| ${_norm(imu.gyro).toStringAsFixed(2)} rad/s', style: style),
+                Text('tap to zero', style: style.copyWith(color: Colors.white54, fontSize: 10)),
               ],
             )
           : const Text('IMU off', style: style),

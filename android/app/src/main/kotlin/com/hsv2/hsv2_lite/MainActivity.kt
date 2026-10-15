@@ -20,8 +20,22 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
+
+    // Phone IMU stands in for the D455 IMU (off by default, see native-lib).
+    private val phoneImu by lazy { PhoneImu(this) }
+
+    override fun onResume() {
+        super.onResume()
+        phoneImu.start()
+    }
+
+    override fun onPause() {
+        phoneImu.stop()
+        super.onPause()
+    }
 
     private val COMMAND_CHANNEL = "com.hsv2/command"
     private val TELEMETRY_CHANNEL = "com.hsv2/telemetry"
@@ -94,7 +108,8 @@ class MainActivity : FlutterActivity() {
     // ============================================================
 
     @Keep
-    external fun startPipeline()
+    /** Returns "" on success, otherwise the error message. */
+    external fun startPipeline(): String
 
     @Keep
     external fun stopPipeline()
@@ -134,7 +149,6 @@ class MainActivity : FlutterActivity() {
     @Keep
     private external fun initQnn(
         contextBinaryPath: String,
-        modelLibraryPath: String,
         nativeLibDir: String
     ): Boolean
 
@@ -213,6 +227,16 @@ class MainActivity : FlutterActivity() {
                         LOG_TAG,
                         "USB Device Detached"
                     )
+
+                    // stopPipeline joins the stream thread, which can sit in
+                    // wait_for_frames for up to 5 s: keep it off the UI thread.
+                    Thread {
+                        try {
+                            stopPipeline()
+                        } catch (e: Exception) {
+                            Log.e(LOG_TAG, "stopPipeline on detach failed", e)
+                        }
+                    }.start()
 
                     notifyUsbStatus(
                         "DISCONNECTED"
@@ -294,20 +318,27 @@ class MainActivity : FlutterActivity() {
 
                 "startPipeline" -> {
 
-                    try {
+                    val error =
+                        try {
+                            startPipeline()
+                        } catch (e: Exception) {
+                            Log.e(
+                                LOG_TAG,
+                                "Native startPipeline failed",
+                                e
+                            )
+                            e.message ?: "startPipeline failed"
+                        }
 
-                        startPipeline()
-
-                    } catch (e: Exception) {
-
-                        Log.e(
-                            LOG_TAG,
-                            "Native startPipeline failed",
-                            e
+                    if (error.isEmpty()) {
+                        result.success(null)
+                    } else {
+                        result.error(
+                            "START_FAILED",
+                            error,
+                            null
                         )
                     }
-
-                    result.success(null)
                 }
 
                 "stopPipeline" -> {
@@ -417,6 +448,13 @@ class MainActivity : FlutterActivity() {
                 // USB check
                 // =================================================
 
+                "zeroImu" -> {
+
+                    phoneImu.zero()
+
+                    result.success(null)
+                }
+
                 "checkUsb" -> {
 
                     checkUsbDevices()
@@ -512,17 +550,9 @@ class MainActivity : FlutterActivity() {
             val contextFile =
                 prepareQnnContextBinary()
 
-            val modelFile =
-                getQnnModelLibraryPath()
-
             Log.i(
                 LOG_TAG,
                 "QNN context prepared: ${contextFile.absolutePath}"
-            )
-
-            Log.i(
-                LOG_TAG,
-                "QNN model library: ${modelFile.absolutePath}"
             )
 
             if (!contextFile.exists()) {
@@ -530,14 +560,6 @@ class MainActivity : FlutterActivity() {
                 Log.e(
                     LOG_TAG,
                     "QNN context binary does not exist"
-                )
-            }
-
-            if (!modelFile.exists()) {
-
-                Log.e(
-                    LOG_TAG,
-                    "QNN model library does not exist"
                 )
             }
 
@@ -666,26 +688,6 @@ class MainActivity : FlutterActivity() {
     }
 
     // ============================================================
-    // QNN model shared library
-    // ============================================================
-
-    private fun getQnnModelLibraryPath(): File {
-
-        val modelFile =
-            File(
-                applicationInfo.nativeLibraryDir,
-                "libyolov8s_int8.so"
-            )
-
-        Log.i(
-            LOG_TAG,
-            "QNN model library path: ${modelFile.absolutePath}"
-        )
-
-        return modelFile
-    }
-
-    // ============================================================
     // Initialize QNN HTP
     // ============================================================
 
@@ -695,9 +697,6 @@ class MainActivity : FlutterActivity() {
 
             val contextBinary =
                 prepareQnnContextBinary()
-
-            val modelLibrary =
-                getQnnModelLibraryPath()
 
             Log.i(
                 LOG_TAG,
@@ -719,16 +718,6 @@ class MainActivity : FlutterActivity() {
                 "Context size: ${contextBinary.length()} bytes"
             )
 
-            Log.i(
-                LOG_TAG,
-                "Model: ${modelLibrary.absolutePath}"
-            )
-
-            Log.i(
-                LOG_TAG,
-                "Model size: ${modelLibrary.length()} bytes"
-            )
-
             if (!contextBinary.exists()) {
 
                 Log.e(
@@ -739,18 +728,9 @@ class MainActivity : FlutterActivity() {
                 return
             }
 
-            // QNN model is packaged as an Android native library.
-            // Do not use File.exists() for the native-library path.
-            // Native QNN loads it by SONAME using dlopen().
-            Log.i(
-                LOG_TAG,
-                "QNN model library packaged: ${modelLibrary.absolutePath}"
-            )
-
             val success =
                 initQnn(
                     contextBinary.absolutePath,
-                    "libyolov8s_int8.so",
                     applicationInfo.nativeLibraryDir
                 )
 
@@ -1046,6 +1026,21 @@ class MainActivity : FlutterActivity() {
     // Telemetry polling
     // ============================================================
 
+    // Use the phone IMU unless the native D455 IMU is running.
+    private fun withPhoneImu(telemetryJson: String): String =
+        try {
+            val obj = JSONObject(telemetryJson)
+            val nativeImu = obj.optJSONObject("imu")
+            if (nativeImu == null || !nativeImu.optBoolean("running")) {
+                obj.put("imu", phoneImu.toJson())
+            } else {
+                nativeImu.put("source", "d455")
+            }
+            obj.toString()
+        } catch (e: Exception) {
+            telemetryJson
+        }
+
     private fun startPolling() {
 
         handler.post(
@@ -1065,7 +1060,7 @@ class MainActivity : FlutterActivity() {
                             ) {
 
                                 eventSink?.success(
-                                    telemetryJson
+                                    withPhoneImu(telemetryJson)
                                 )
                             }
 
