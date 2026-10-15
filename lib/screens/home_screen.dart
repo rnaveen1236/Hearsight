@@ -130,43 +130,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                         child: _imuPanel(state.telemetry.imu),
                                       ),
                                     ),
-                                    // Center Crosshair and HUD aligned to RGB Feed
-                                    Center(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          const Icon(Icons.add, color: Colors.greenAccent, size: 48),
-                                          const SizedBox(height: 8),
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                            decoration: BoxDecoration(
-                                              color: Colors.black87,
-                                              borderRadius: BorderRadius.circular(8),
-                                              border: Border.all(color: Colors.greenAccent.withOpacity(0.5)),
-                                            ),
-                                            child: Column(
-                                              children: [
-                                                Text(
-                                                  "${state.telemetry.centerDistanceMeters.toStringAsFixed(2)}m",
-                                                  style: const TextStyle(
-                                                    color: Colors.greenAccent,
-                                                    fontSize: 24,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
-                                                ),
-                                                Text(
-                                                  "Latency: ${state.telemetry.p50LatencyMs.toStringAsFixed(1)} ms",
-                                                  style: const TextStyle(
-                                                    color: Colors.yellowAccent,
-                                                    fontSize: 12,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
                                   ],
                                 ),
                                 ),
