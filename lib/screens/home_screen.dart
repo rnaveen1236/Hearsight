@@ -114,12 +114,12 @@ class _HomeScreenState extends State<HomeScreen> {
                                         child: state.textureId != null ? Texture(textureId: state.textureId!) : const SizedBox(),
                                       ),
                                     ),
-                                    for (final det in state.detections)
-                                      _detectionLabel(
-                                        det,
-                                        constraints.biggest,
-                                        MediaQuery.of(context).padding.top,
-                                      ),
+                                    ..._detectionLabels(
+                                      context,
+                                      state.detections,
+                                      constraints.biggest,
+                                      MediaQuery.of(context).padding.top,
+                                    ),
                                     // IMU panel (bottom-right of the RGB view, clear of labels)
                                     Positioned(
                                       bottom: 8,
@@ -266,58 +266,101 @@ class _HomeScreenState extends State<HomeScreen> {
   static double _norm(List<double> v) =>
       v.length < 3 ? 0.0 : math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 
-  // Class name + distance tag for a native-drawn box. bbox is [x, y, w, h]
-  // in 640x480 camera pixels; the feed is shown with BoxFit.cover in a
-  // [view]-sized area, so map through the same scale/crop here and keep
-  // the label inside the visible area and below [topInset] (status bar).
-  Widget _detectionLabel(DetectionResult det, Size view, double topInset) {
-    if (det.boundingBox.length < 4) return const SizedBox.shrink();
+  static const _labelStyle = TextStyle(
+    color: Colors.black,
+    fontSize: 14,
+    fontWeight: FontWeight.bold,
+  );
 
+  // Class name + distance tags for the native-drawn boxes. bbox is
+  // [x, y, w, h] in 640x480 camera pixels; the feed is shown with
+  // BoxFit.cover in a [view]-sized area, so map through the same scale/crop.
+  // Labels are placed greedily in confidence order without overlapping:
+  // above the box, else stepping down inside it, else just below it; a
+  // label with no free spot is skipped. All stay below [topInset].
+  List<Widget> _detectionLabels(BuildContext context,
+      List<DetectionResult> detections, Size view, double topInset) {
     const srcW = 640.0, srcH = 480.0;
-    const labelHeight = 24.0, labelMaxWidth = 180.0;
+    const labelHeight = 24.0, labelMaxWidth = 220.0, padX = 6.0, gap = 2.0;
     final scale = (view.width / srcW) > (view.height / srcH)
         ? view.width / srcW
         : view.height / srcH;
     final dx = (view.width - srcW * scale) / 2;
     final dy = (view.height - srcH * scale) / 2;
+    final maxY = view.height - labelHeight;
 
-    final left = det.boundingBox[0] * scale + dx;
-    final top = det.boundingBox[1] * scale + dy;
-    final bottom = (det.boundingBox[1] + det.boundingBox[3]) * scale + dy;
+    final sorted = detections.where((d) => d.boundingBox.length >= 4).toList()
+      ..sort((a, b) => b.confidence.compareTo(a.confidence));
 
-    // Box entirely cropped out of view: no label.
-    if (bottom < topInset || top > view.height) return const SizedBox.shrink();
+    // Measure with the same theme font and text scale the Text widget uses.
+    final measureStyle = DefaultTextStyle.of(context).style.merge(_labelStyle);
+    final textScaler = MediaQuery.textScalerOf(context);
 
-    // Above the box if there is room, else just inside its (visible) top.
-    final minY = topInset;
-    var y = top - labelHeight;
-    if (y < minY) y = (top < minY ? minY : top);
-    final x = left.clamp(0.0, (view.width - labelMaxWidth).clamp(0.0, double.infinity));
+    final placed = <Rect>[];
+    final widgets = <Widget>[];
 
-    final distance = det.distanceMeters > 0
-        ? '${det.distanceMeters.toStringAsFixed(1)} m'
-        : '-- m';
+    for (final det in sorted) {
+      final left = det.boundingBox[0] * scale + dx;
+      final top = det.boundingBox[1] * scale + dy;
+      final bottom = (det.boundingBox[1] + det.boundingBox[3]) * scale + dy;
 
-    return Positioned(
-      left: x,
-      top: y,
-      child: Container(
-        height: labelHeight,
-        constraints: const BoxConstraints(maxWidth: labelMaxWidth),
-        padding: const EdgeInsets.symmetric(horizontal: 6),
-        alignment: Alignment.centerLeft,
-        color: Colors.greenAccent,
-        child: Text(
-          '${det.objectName} · $distance',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: Colors.black,
-            fontSize: 14,
-            fontWeight: FontWeight.bold,
+      // Box entirely cropped out of view: no label.
+      if (bottom < topInset || top > view.height) continue;
+
+      final distance = det.distanceMeters > 0
+          ? '${det.distanceMeters.toStringAsFixed(1)} m'
+          : '-- m';
+      final text = '${det.objectName} · $distance';
+
+      // Fit the background to the text.
+      final painter = TextPainter(
+        text: TextSpan(text: text, style: measureStyle),
+        maxLines: 1,
+        textDirection: TextDirection.ltr,
+        textScaler: textScaler,
+      )..layout();
+      // +2 px so rounding never triggers the ellipsis.
+      final width = (painter.width.ceilToDouble() + 2 * padX + 2).clamp(0.0, labelMaxWidth);
+      final x = left.clamp(0.0, (view.width - width).clamp(0.0, double.infinity));
+
+      // Candidate rows: above the box, then down through the box, then below.
+      final candidates = <double>[top - labelHeight];
+      for (var y = top; y <= bottom - labelHeight; y += labelHeight + gap) {
+        candidates.add(y);
+      }
+      candidates.add(bottom + gap);
+
+      Rect? spot;
+      for (final y in candidates) {
+        if (y < topInset || y > maxY) continue;
+        final r = Rect.fromLTWH(x, y, width, labelHeight);
+        if (!placed.any((p) => p.inflate(gap).overlaps(r))) {
+          spot = r;
+          break;
+        }
+      }
+      if (spot == null) continue;
+      placed.add(spot);
+
+      widgets.add(Positioned(
+        left: spot.left,
+        top: spot.top,
+        child: Container(
+          width: width,
+          height: labelHeight,
+          padding: const EdgeInsets.symmetric(horizontal: padX),
+          alignment: Alignment.centerLeft,
+          color: Colors.greenAccent,
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: _labelStyle,
           ),
         ),
-      ),
-    );
+      ));
+    }
+
+    return widgets;
   }
 }
