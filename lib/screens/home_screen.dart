@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
@@ -99,16 +100,31 @@ class _HomeScreenState extends State<HomeScreen> {
                             children: [
                               // Top Half: RGB Feed
                               Expanded(
-                                child: Stack(
+                                child: ClipRect(
+                                child: LayoutBuilder(
+                                  builder: (context, constraints) => Stack(
                                   fit: StackFit.expand,
                                   children: [
                                     FittedBox(
                                       fit: BoxFit.cover,
+                                      clipBehavior: Clip.hardEdge,
                                       child: SizedBox(
                                         width: 640,
                                         height: 480,
                                         child: state.textureId != null ? Texture(textureId: state.textureId!) : const SizedBox(),
                                       ),
+                                    ),
+                                    for (final det in state.detections)
+                                      _detectionLabel(
+                                        det,
+                                        constraints.biggest,
+                                        MediaQuery.of(context).padding.top,
+                                      ),
+                                    // D455 IMU panel (top-right, below the status bar)
+                                    Positioned(
+                                      top: MediaQuery.of(context).padding.top + 8,
+                                      right: 8,
+                                      child: _imuPanel(state.telemetry.imu),
                                     ),
                                     // Center Crosshair and HUD aligned to RGB Feed
                                     Center(
@@ -149,16 +165,21 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ),
                                   ],
                                 ),
+                                ),
+                                ),
                               ),
                               // Bottom Half: Depth Feed
                               Expanded(
+                                child: ClipRect(
                                 child: FittedBox(
                                   fit: BoxFit.cover,
+                                  clipBehavior: Clip.hardEdge,
                                   child: SizedBox(
                                     width: 640,
                                     height: 480,
                                     child: state.depthTextureId != null ? Texture(textureId: state.depthTextureId!) : const SizedBox(),
                                   ),
+                                ),
                                 ),
                               ),
                             ],
@@ -242,5 +263,88 @@ class _HomeScreenState extends State<HomeScreen> {
     if (status == 'REQUESTING PERMISSION') return Colors.orangeAccent;
     if (status == 'DISCONNECTED' || status == 'PERMISSION DENIED') return Colors.redAccent;
     return Colors.grey;
+  }
+
+  // Live D455 IMU readout: orientation + sample rates.
+  Widget _imuPanel(ImuData imu) {
+    const style = TextStyle(color: Colors.white, fontSize: 12, fontFeatures: [FontFeature.tabularFigures()]);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: imu.running ? Colors.cyanAccent.withValues(alpha: 0.6) : Colors.white24),
+      ),
+      child: imu.running
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('IMU  pitch ${imu.pitchDeg.toStringAsFixed(1)}°  roll ${imu.rollDeg.toStringAsFixed(1)}°',
+                    style: style.copyWith(color: Colors.cyanAccent, fontWeight: FontWeight.bold)),
+                Text('gyro ${imu.gyroHz.toStringAsFixed(0)} Hz  accel ${imu.accelHz.toStringAsFixed(0)} Hz', style: style),
+                Text('|g| ${_norm(imu.accel).toStringAsFixed(2)} m/s²  |ω| ${_norm(imu.gyro).toStringAsFixed(2)} rad/s', style: style),
+              ],
+            )
+          : const Text('IMU off', style: style),
+    );
+  }
+
+  static double _norm(List<double> v) =>
+      v.length < 3 ? 0.0 : math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+
+  // Class name + distance tag for a native-drawn box. bbox is [x, y, w, h]
+  // in 640x480 camera pixels; the feed is shown with BoxFit.cover in a
+  // [view]-sized area, so map through the same scale/crop here and keep
+  // the label inside the visible area and below [topInset] (status bar).
+  Widget _detectionLabel(DetectionResult det, Size view, double topInset) {
+    if (det.boundingBox.length < 4) return const SizedBox.shrink();
+
+    const srcW = 640.0, srcH = 480.0;
+    const labelHeight = 24.0, labelMaxWidth = 180.0;
+    final scale = (view.width / srcW) > (view.height / srcH)
+        ? view.width / srcW
+        : view.height / srcH;
+    final dx = (view.width - srcW * scale) / 2;
+    final dy = (view.height - srcH * scale) / 2;
+
+    final left = det.boundingBox[0] * scale + dx;
+    final top = det.boundingBox[1] * scale + dy;
+    final bottom = (det.boundingBox[1] + det.boundingBox[3]) * scale + dy;
+
+    // Box entirely cropped out of view: no label.
+    if (bottom < topInset || top > view.height) return const SizedBox.shrink();
+
+    // Above the box if there is room, else just inside its (visible) top.
+    final minY = topInset;
+    var y = top - labelHeight;
+    if (y < minY) y = (top < minY ? minY : top);
+    final x = left.clamp(0.0, (view.width - labelMaxWidth).clamp(0.0, double.infinity));
+
+    final distance = det.distanceMeters > 0
+        ? '${det.distanceMeters.toStringAsFixed(1)} m'
+        : '-- m';
+
+    return Positioned(
+      left: x,
+      top: y,
+      child: Container(
+        height: labelHeight,
+        constraints: const BoxConstraints(maxWidth: labelMaxWidth),
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        alignment: Alignment.centerLeft,
+        color: Colors.greenAccent,
+        child: Text(
+          '${det.objectName} · $distance',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.black,
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
   }
 }

@@ -257,6 +257,62 @@ static Qnn_ClientBuffer_t* tensorClientBuffer(
     return nullptr;
 }
 
+static size_t dataTypeSize(Qnn_DataType_t type) {
+    switch (type) {
+        case QNN_DATATYPE_INT_8:
+        case QNN_DATATYPE_UINT_8:
+        case QNN_DATATYPE_SFIXED_POINT_8:
+        case QNN_DATATYPE_UFIXED_POINT_8:
+        case QNN_DATATYPE_BOOL_8:
+            return 1;
+        case QNN_DATATYPE_INT_16:
+        case QNN_DATATYPE_UINT_16:
+        case QNN_DATATYPE_FLOAT_16:
+        case QNN_DATATYPE_SFIXED_POINT_16:
+        case QNN_DATATYPE_UFIXED_POINT_16:
+            return 2;
+        case QNN_DATATYPE_INT_32:
+        case QNN_DATATYPE_UINT_32:
+        case QNN_DATATYPE_FLOAT_32:
+        case QNN_DATATYPE_SFIXED_POINT_32:
+        case QNN_DATATYPE_UFIXED_POINT_32:
+            return 4;
+        default:
+            return 0;
+    }
+}
+
+static QnnTensorInfo makeTensorInfo(Qnn_Tensor_t& tensor) {
+    QnnTensorInfo info;
+
+    const char* name = tensorName(tensor);
+    info.name = name ? name : "";
+
+    uint32_t rank = tensorRank(tensor);
+    uint32_t* dims = tensorDimensions(tensor);
+
+    size_t elements = 1;
+    for (uint32_t i = 0; dims && i < rank; ++i) {
+        info.dims.push_back(dims[i]);
+        elements *= dims[i];
+    }
+
+    info.bytes = elements * dataTypeSize(tensorDataType(tensor));
+
+    const Qnn_QuantizeParams_t& q =
+        tensor.version == QNN_TENSOR_VERSION_2
+            ? tensor.v2.quantizeParams
+            : tensor.v1.quantizeParams;
+
+    if (q.encodingDefinition == QNN_DEFINITION_DEFINED &&
+        q.quantizationEncoding == QNN_QUANTIZATION_ENCODING_SCALE_OFFSET) {
+        info.scale = q.scaleOffsetEncoding.scale;
+        info.offset = q.scaleOffsetEncoding.offset;
+    }
+
+    return info;
+}
+
 }  // namespace
 
 
@@ -588,6 +644,113 @@ bool QnnRuntime::readContextBinary(std::vector<uint8_t>& binary) {
     return true;
 }
 
+/*
+ * Pull graph name and first input/output tensor metadata out of the
+ * context binary info. Tensors are deep-copied because binaryInfo is
+ * owned by the system context and freed right after.
+ */
+static bool extractGraphMetadata(
+        const QnnSystemContext_BinaryInfo_t* info,
+        std::string& graphName,
+        Qnn_Tensor_t& inputTensor,
+        std::vector<Qnn_Tensor_t>& outputTensors,
+        std::string& error) {
+
+    uint32_t numGraphs = 0;
+    const QnnSystemContext_GraphInfo_t* graphs = nullptr;
+
+    switch (info->version) {
+        case QNN_SYSTEM_CONTEXT_BINARY_INFO_VERSION_1:
+            numGraphs = info->contextBinaryInfoV1.numGraphs;
+            graphs = info->contextBinaryInfoV1.graphs;
+            break;
+        case QNN_SYSTEM_CONTEXT_BINARY_INFO_VERSION_2:
+            numGraphs = info->contextBinaryInfoV2.numGraphs;
+            graphs = info->contextBinaryInfoV2.graphs;
+            break;
+        case QNN_SYSTEM_CONTEXT_BINARY_INFO_VERSION_3:
+            numGraphs = info->contextBinaryInfoV3.numGraphs;
+            graphs = info->contextBinaryInfoV3.graphs;
+            break;
+        default:
+            error = "Unsupported context binary info version: " +
+                    std::to_string(static_cast<int>(info->version));
+            return false;
+    }
+
+    if (numGraphs == 0 || !graphs) {
+        error = "Context binary contains no graphs";
+        return false;
+    }
+
+    const QnnSystemContext_GraphInfo_t& g = graphs[0];
+
+    const char* name = nullptr;
+    uint32_t numInputs = 0;
+    uint32_t numOutputs = 0;
+    const Qnn_Tensor_t* inputs = nullptr;
+    const Qnn_Tensor_t* outputs = nullptr;
+
+#define HSV2_READ_GRAPH_INFO(field)                 \
+    name = g.field.graphName;                       \
+    numInputs = g.field.numGraphInputs;             \
+    inputs = g.field.graphInputs;                   \
+    numOutputs = g.field.numGraphOutputs;           \
+    outputs = g.field.graphOutputs;
+
+    switch (g.version) {
+        case QNN_SYSTEM_CONTEXT_GRAPH_INFO_VERSION_1:
+            HSV2_READ_GRAPH_INFO(graphInfoV1)
+            break;
+        case QNN_SYSTEM_CONTEXT_GRAPH_INFO_VERSION_2:
+            HSV2_READ_GRAPH_INFO(graphInfoV2)
+            break;
+        case QNN_SYSTEM_CONTEXT_GRAPH_INFO_VERSION_3:
+            HSV2_READ_GRAPH_INFO(graphInfoV3)
+            break;
+        default:
+            error = "Unsupported graph info version: " +
+                    std::to_string(static_cast<int>(g.version));
+            return false;
+    }
+
+#undef HSV2_READ_GRAPH_INFO
+
+    if (!name) {
+        error = "Graph in context binary has no name";
+        return false;
+    }
+
+    if (numInputs == 0 || !inputs ||
+        numOutputs == 0 || !outputs) {
+        error = "Graph in context binary has no input/output tensors";
+        return false;
+    }
+
+    graphName = name;
+
+    LOGI(
+        "Context binary: %u graph(s); using '%s' (%u input(s), %u output(s))",
+        numGraphs, name, numInputs, numOutputs);
+
+    if (!copyTensorMetadata(inputs[0], inputTensor)) {
+        error = "Failed to copy input tensor metadata from context binary";
+        return false;
+    }
+
+    outputTensors.assign(numOutputs, Qnn_Tensor_t{});
+
+    for (uint32_t i = 0; i < numOutputs; ++i) {
+        if (!copyTensorMetadata(outputs[i], outputTensors[i])) {
+            error = "Failed to copy output tensor metadata from context binary";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
 bool QnnRuntime::createContextFromBinary() {
     std::vector<uint8_t> binary;
 
@@ -643,6 +806,21 @@ bool QnnRuntime::createContextFromBinary() {
     LOGI(
         "Context binary metadata size=%llu",
         static_cast<unsigned long long>(binaryInfoSize));
+
+    {
+        std::string metaError;
+
+        if (!extractGraphMetadata(
+                binaryInfo,
+                graphName_,
+                inputTensor_,
+                outputTensors_,
+                metaError)) {
+            qnnSystemInterface_.systemContextFree(sysCtx);
+
+            return setError(metaError);
+        }
+    }
 
     err =
         qnnInterface_.contextCreateFromBinary(
@@ -715,69 +893,45 @@ bool QnnRuntime::retrieveGraph() {
             "QNN graphRetrieve function unavailable");
     }
 
-    /*
-     * The generated YOLOv8s context normally contains one
-     * executable graph. Try the common graph name first.
-     *
-     * If the generated graph has another name, the model
-     * metadata path can be used in a later step.
-     */
-    const char* graphNames[] = {
-        "graph",
-        "yolov8s",
-        "yolov8s_int8",
-        "main",
-        "QnnModel_graph"
-    };
+    if (graphName_.empty()) {
+        return setError(
+            "Graph name unknown; context binary metadata not loaded");
+    }
 
-    for (const char* name : graphNames) {
-        Qnn_GraphHandle_t graph = nullptr;
+    Qnn_GraphHandle_t graph = nullptr;
 
-        Qnn_ErrorHandle_t err =
-            qnnInterface_.graphRetrieve(
-                contextHandle_,
-                name,
-                &graph);
+    Qnn_ErrorHandle_t err =
+        qnnInterface_.graphRetrieve(
+            contextHandle_,
+            graphName_.c_str(),
+            &graph);
 
-        if (err == QNN_SUCCESS && graph) {
-            graphHandle_ = graph;
-            graphInitialized_ = true;
+    if (err == QNN_SUCCESS && graph) {
+        graphHandle_ = graph;
+        graphInitialized_ = true;
 
-            LOGI(
-                "Retrieved QNN graph: %s",
-                name);
+        LOGI(
+            "Retrieved QNN graph: %s",
+            graphName_.c_str());
 
-            return true;
-        }
+        return true;
     }
 
     return setError(
-        "Unable to retrieve YOLOv8s graph from context binary");
+        "graphRetrieve failed for '" + graphName_ + "': " +
+        qnnError(err));
 }
 
 
 bool QnnRuntime::setupInputTensor() {
-    if (!graphsInfo_ || graphsCount_ == 0) {
+    // Metadata is copied from the context binary in
+    // createContextFromBinary().
+    if (tensorRank(inputTensor_) == 0) {
         return setError(
-            "No graph metadata available");
+            "No input tensor metadata from context binary");
     }
 
-    qnn_runtime_api::GraphInfo_t* graphInfo =
-        graphsInfo_[0];
-
-    if (!graphInfo ||
-        graphInfo->numInputTensors == 0 ||
-        !graphInfo->inputTensors) {
-        return setError(
-            "Graph has no input tensor metadata");
-    }
-
-    if (!copyTensorMetadata(
-            graphInfo->inputTensors[0],
-            inputTensor_)) {
-        return setError(
-            "Failed to copy input tensor metadata");
-    }
+    inputInfo_ = makeTensorInfo(inputTensor_);
 
     LOGI(
         "Input tensor: name=%s rank=%u type=%d datatype=%d memtype=%d",
@@ -794,37 +948,33 @@ bool QnnRuntime::setupInputTensor() {
 
 
 bool QnnRuntime::setupOutputTensor() {
-    if (!graphsInfo_ || graphsCount_ == 0) {
+    // Metadata is copied from the context binary in
+    // createContextFromBinary().
+    if (outputTensors_.empty()) {
         return setError(
-            "No graph metadata available");
+            "No output tensor metadata from context binary");
     }
 
-    qnn_runtime_api::GraphInfo_t* graphInfo =
-        graphsInfo_[0];
+    outputInfos_.clear();
 
-    if (!graphInfo ||
-        graphInfo->numOutputTensors == 0 ||
-        !graphInfo->outputTensors) {
-        return setError(
-            "Graph has no output tensor metadata");
+    for (Qnn_Tensor_t& tensor : outputTensors_) {
+        QnnTensorInfo info = makeTensorInfo(tensor);
+
+        if (info.bytes == 0) {
+            return setError(
+                "Unsupported datatype for output tensor " + info.name);
+        }
+
+        LOGI(
+            "Output tensor: name=%s rank=%zu bytes=%zu scale=%f offset=%d",
+            info.name.c_str(),
+            info.dims.size(),
+            info.bytes,
+            info.scale,
+            info.offset);
+
+        outputInfos_.push_back(std::move(info));
     }
-
-    if (!copyTensorMetadata(
-            graphInfo->outputTensors[0],
-            outputTensor_)) {
-        return setError(
-            "Failed to copy output tensor metadata");
-    }
-
-    LOGI(
-        "Output tensor: name=%s rank=%u type=%d datatype=%d memtype=%d",
-        tensorName(outputTensor_)
-            ? tensorName(outputTensor_)
-            : "<null>",
-        tensorRank(outputTensor_),
-        static_cast<int>(tensorType(outputTensor_)),
-        static_cast<int>(tensorDataType(outputTensor_)),
-        static_cast<int>(tensorMemType(outputTensor_)));
 
     return true;
 }
@@ -832,7 +982,8 @@ bool QnnRuntime::setupOutputTensor() {
 
 bool QnnRuntime::initialize(
         const std::string& contextBinaryPath,
-        const std::string& modelLibraryPath) {
+        const std::string& modelLibraryPath,
+        const std::string& nativeLibDir) {
 
     shutdown();
 
@@ -842,30 +993,21 @@ bool QnnRuntime::initialize(
 
     // Set ADSP_LIBRARY_PATH so the FastRPC/ADSP loader can find
     // the DSP-side HTP skel library (for example,
-    // libQnnHtpV81Skel.so) from the native library directory
-    // and standard DSP locations.
-    {
-        size_t lastSlash = modelLibraryPath_.find_last_of('/');
+    // libQnnHtpV81Skel.so) from the app's native library directory
+    // and standard DSP locations. Must be set before deviceCreate.
+    if (nativeLibDir.empty()) {
+        LOGE("Native lib dir is empty; ADSP_LIBRARY_PATH not set");
+    } else {
+        std::string adspPath =
+            nativeLibDir +
+            ";/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/dsp";
 
-        if (lastSlash != std::string::npos) {
-            std::string nativeLibDir =
-                modelLibraryPath_.substr(0, lastSlash);
-
-            std::string adspPath =
-                nativeLibDir +
-                ";/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/dsp";
-
-            if (setenv("ADSP_LIBRARY_PATH", adspPath.c_str(), 1) != 0) {
-                LOGE("Failed to set ADSP_LIBRARY_PATH");
-            } else {
-                LOGI(
-                    "ADSP_LIBRARY_PATH set to: %s",
-                    adspPath.c_str());
-            }
+        if (setenv("ADSP_LIBRARY_PATH", adspPath.c_str(), 1) != 0) {
+            LOGE("Failed to set ADSP_LIBRARY_PATH");
         } else {
-            LOGE(
-                "Could not derive native lib dir from model library path: %s",
-                modelLibraryPath_.c_str());
+            LOGI(
+                "ADSP_LIBRARY_PATH set to: %s",
+                adspPath.c_str());
         }
     }
 
@@ -886,82 +1028,18 @@ bool QnnRuntime::initialize(
     }
 
     /*
-     * The generated model library is needed for graph/tensor
-     * metadata. Load it before using composeGraphs.
-     */
-    if (!loadModelLibrary()) {
-        return false;
-    }
-
-    /*
-     * Create the QNN context from the pre-generated HTP context
-     * binary BEFORE composing the generated model graph.
-     *
-     * QnnModel_composeGraphs() passes contextHandle to
-     * QnnModel::initialize(). A null context causes the generated
-     * model to return MODEL_CONTEXT_ERROR (5).
+     * The HTP context binary already contains the finalized graph
+     * and its tensor metadata. Create the context from it and
+     * retrieve the graph by name; no generated model library or
+     * QnnModel_composeGraphs() is needed (composing into a context
+     * restored from a binary is not supported).
      */
     if (!createContextFromBinary()) {
         return false;
     }
 
-    if (!composeGraphs_) {
-        return setError(
-            "QnnModel_composeGraphs unavailable");
-    }
-
-    const qnn_runtime_api::GraphConfigInfo_t** graphConfigs =
-        nullptr;
-
-    qnn_runtime_api::ModelError_t modelErr =
-        composeGraphs_(
-            backendHandle_,
-            qnnInterface_,
-            contextHandle_,
-            graphConfigs,
-            0,
-            &graphsInfo_,
-            &graphsCount_,
-            false,
-            nullptr,
-            QNN_LOG_LEVEL_ERROR);
-
-    if (modelErr !=
-        qnn_runtime_api::MODEL_NO_ERROR) {
-
-        std::ostringstream oss;
-        oss << "QnnModel_composeGraphs failed: "
-            << static_cast<int>(modelErr);
-
-        return setError(oss.str());
-    }
-
-    if (!graphsInfo_ || graphsCount_ == 0) {
-        return setError(
-            "QnnModel_composeGraphs returned no graphs");
-    }
-
-    LOGI(
-        "Model metadata contains %u graph(s)",
-        graphsCount_);
-
-    /*
-     * Prefer the graph handle from generated metadata if present.
-     * Otherwise retrieve it from the context.
-     */
-    if (graphsInfo_[0] &&
-        graphsInfo_[0]->graph) {
-
-        graphHandle_ =
-            graphsInfo_[0]->graph;
-
-        graphInitialized_ = true;
-
-        LOGI("Using graph handle from model metadata");
-    } else {
-        if (!retrieveGraph()) {
-            return false;
-        }
+    if (!retrieveGraph()) {
+        return false;
     }
 
     if (!setupInputTensor()) {
@@ -981,16 +1059,17 @@ bool QnnRuntime::initialize(
 bool QnnRuntime::execute(
         const uint8_t* inputData,
         size_t inputSize,
-        std::vector<uint8_t>& outputData) {
+        std::vector<std::vector<uint8_t>>& outputs) {
 
     if (!graphInitialized_ || !graphHandle_) {
         return setError(
             "QNN graph is not initialized");
     }
 
-    if (!inputData || inputSize == 0) {
+    if (!inputData || inputSize != inputInfo_.bytes) {
         return setError(
-            "Invalid input buffer");
+            "Invalid input buffer: got " + std::to_string(inputSize) +
+            " bytes, expected " + std::to_string(inputInfo_.bytes));
     }
 
     Qnn_ClientBuffer_t* inputClient =
@@ -1007,53 +1086,24 @@ bool QnnRuntime::execute(
     inputClient->dataSize =
         static_cast<uint32_t>(inputSize);
 
-    Qnn_ClientBuffer_t* outputClient =
-        tensorClientBuffer(outputTensor_);
+    // Caller-owned output buffers are reused across frames.
+    outputs.resize(outputTensors_.size());
 
-    if (!outputClient) {
-        return setError(
-            "Output tensor does not expose client buffer");
+    for (size_t i = 0; i < outputTensors_.size(); ++i) {
+        Qnn_ClientBuffer_t* outputClient =
+            tensorClientBuffer(outputTensors_[i]);
+
+        if (!outputClient) {
+            return setError(
+                "Output tensor does not expose client buffer");
+        }
+
+        outputs[i].resize(outputInfos_[i].bytes);
+
+        outputClient->data = outputs[i].data();
+        outputClient->dataSize =
+            static_cast<uint32_t>(outputs[i].size());
     }
-
-    /*
-     * Output size is obtained from the metadata dimensions.
-     * For the YOLOv8s INT8 model the output is expected to be
-     * [1,84,8400] with 8-bit elements.
-     */
-    size_t outputElements = 1;
-
-    uint32_t rank = tensorRank(outputTensor_);
-
-    uint32_t* dims =
-        tensorDimensions(outputTensor_);
-
-    if (!dims || rank == 0) {
-        return setError(
-            "Output tensor has invalid dimensions");
-    }
-
-    for (uint32_t i = 0; i < rank; ++i) {
-        outputElements *= dims[i];
-    }
-
-    size_t outputBytes = outputElements;
-
-    void* outputBuffer =
-        malloc(outputBytes);
-
-    if (!outputBuffer) {
-        return setError(
-            "Failed to allocate QNN output buffer");
-    }
-
-    std::memset(
-        outputBuffer,
-        0,
-        outputBytes);
-
-    outputClient->data = outputBuffer;
-    outputClient->dataSize =
-        static_cast<uint32_t>(outputBytes);
 
     auto start =
         std::chrono::steady_clock::now();
@@ -1063,51 +1113,32 @@ bool QnnRuntime::execute(
             graphHandle_,
             &inputTensor_,
             1,
-            &outputTensor_,
-            1,
+            outputTensors_.data(),
+            static_cast<uint32_t>(outputTensors_.size()),
             profileHandle_,
             nullptr);
 
     auto end =
         std::chrono::steady_clock::now();
 
-    double elapsedMs =
+    lastExecuteMs_ =
         std::chrono::duration<double, std::milli>(
             end - start).count();
-
-    if (err != QNN_SUCCESS) {
-        free(outputBuffer);
-
-        inputClient->data = nullptr;
-        inputClient->dataSize = 0;
-
-        outputClient->data = nullptr;
-        outputClient->dataSize = 0;
-
-        return setError(
-            "QNN graphExecute failed: " +
-            qnnError(err));
-    }
-
-    outputData.resize(outputBytes);
-
-    std::memcpy(
-        outputData.data(),
-        outputBuffer,
-        outputBytes);
-
-    free(outputBuffer);
 
     inputClient->data = nullptr;
     inputClient->dataSize = 0;
 
-    outputClient->data = nullptr;
-    outputClient->dataSize = 0;
+    for (Qnn_Tensor_t& tensor : outputTensors_) {
+        Qnn_ClientBuffer_t* outputClient = tensorClientBuffer(tensor);
+        outputClient->data = nullptr;
+        outputClient->dataSize = 0;
+    }
 
-    LOGI(
-        "QNN inference completed: %.3f ms, output=%zu bytes",
-        elapsedMs,
-        outputBytes);
+    if (err != QNN_SUCCESS) {
+        return setError(
+            "QNN graphExecute failed: " +
+            qnnError(err));
+    }
 
     return true;
 }
@@ -1153,17 +1184,20 @@ void QnnRuntime::cleanupModel() {
     }
 
     freeTensorMetadata(inputTensor_);
-    freeTensorMetadata(outputTensor_);
+
+    for (Qnn_Tensor_t& tensor : outputTensors_) {
+        freeTensorMetadata(tensor);
+    }
+
+    outputTensors_.clear();
+    inputInfo_ = QnnTensorInfo{};
+    outputInfos_.clear();
 
     std::memset(
         &inputTensor_,
         0,
         sizeof(inputTensor_));
 
-    std::memset(
-        &outputTensor_,
-        0,
-        sizeof(outputTensor_));
 
     composeGraphs_ = nullptr;
     freeGraphsInfo_ = nullptr;

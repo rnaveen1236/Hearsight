@@ -56,6 +56,8 @@ add_library(
 
         native-lib.cpp
         qnn_runtime.cpp
+        yolo_detector.cpp
+        imu.cpp
 )
 
 # ============================================================

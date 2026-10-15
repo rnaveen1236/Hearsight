@@ -179,6 +179,9 @@ class AppState extends ChangeNotifier {
           batteryLevel: (data['battery'] as num?)?.toDouble() ?? 100.0,
           centerDistanceMeters: (data['centerDistance'] as num?)?.toDouble() ?? 0.0,
           droppedFrames: (data['droppedFrames'] as num?)?.toInt() ?? 0,
+          imu: data['imu'] is Map<String, dynamic>
+              ? ImuData.fromJson(data['imu'] as Map<String, dynamic>)
+              : const ImuData(),
         );
 
         if (data.containsKey('detections')) {

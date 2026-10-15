@@ -134,7 +134,8 @@ class MainActivity : FlutterActivity() {
     @Keep
     private external fun initQnn(
         contextBinaryPath: String,
-        modelLibraryPath: String
+        modelLibraryPath: String,
+        nativeLibDir: String
     ): Boolean
 
     // ============================================================
@@ -554,7 +555,35 @@ class MainActivity : FlutterActivity() {
     // Copy QNN HTP context binary from assets
     // ============================================================
 
+    // HTP context binaries are compiled per Hexagon arch.
+    // SoC -> arch from the QAIRT 2.47 SoC table.
+    private fun qnnContextAssetName(): String {
+
+        val soc =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                Build.SOC_MODEL
+            else
+                ""
+
+        val arch =
+            when (soc) {
+                "SM6650", "SM6450", "SM7550", "SM7675", "SM7750",
+                "SM8550", "SM8550P" -> "v73"
+                else -> "v81"
+            }
+
+        Log.i(
+            LOG_TAG,
+            "SoC: $soc -> QNN HTP $arch context binary"
+        )
+
+        return "yolov8s_int8_$arch.bin"
+    }
+
     private fun prepareQnnContextBinary(): File {
+
+        val assetName =
+            qnnContextAssetName()
 
         val qnnDir =
             File(
@@ -570,12 +599,20 @@ class MainActivity : FlutterActivity() {
         val outputFile =
             File(
                 qnnDir,
-                "yolov8s_int8_sm8850.bin.SM8850.bin"
+                assetName
             )
+
+        // Re-copy after every app install/update so a new model in
+        // assets replaces the cached copy.
+        val appUpdatedAt =
+            packageManager
+                .getPackageInfo(packageName, 0)
+                .lastUpdateTime
 
         if (
             !outputFile.exists() ||
-            outputFile.length() == 0L
+            outputFile.length() == 0L ||
+            outputFile.lastModified() < appUpdatedAt
         ) {
 
             Log.i(
@@ -584,7 +621,7 @@ class MainActivity : FlutterActivity() {
             )
 
             assets.open(
-                "qnn/yolov8s_int8_sm8850.bin.SM8850.bin"
+                "qnn/$assetName"
             ).use { input ->
 
                 FileOutputStream(
@@ -713,7 +750,8 @@ class MainActivity : FlutterActivity() {
             val success =
                 initQnn(
                     contextBinary.absolutePath,
-                    "libyolov8s_int8.so"
+                    "libyolov8s_int8.so",
+                    applicationInfo.nativeLibraryDir
                 )
 
             if (success) {

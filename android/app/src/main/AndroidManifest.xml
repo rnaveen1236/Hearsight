@@ -5,6 +5,16 @@
         android:label="hsv2_lite"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <!-- Impeller ignores transforms/clips on SurfaceTexture-backed
+             Texture widgets on Android, which stretched the RealSense feeds
+             over the whole screen. Use the Skia renderer. -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
+        <!-- Required on Android 12+ for QNN HTP to reach the cDSP via FastRPC -->
+        <uses-native-library
+            android:name="libcdsprpc.so"
+            android:required="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

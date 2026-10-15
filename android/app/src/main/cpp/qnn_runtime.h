@@ -50,6 +50,16 @@ struct GraphConfigInfo_t {
 }  // namespace qnn_runtime_api
 
 
+// Shape and quantization of a graph input/output.
+// Dequantize with: real = (q + offset) * scale.
+struct QnnTensorInfo {
+    std::string name;
+    std::vector<uint32_t> dims;
+    float scale{1.0f};
+    int32_t offset{0};
+    size_t bytes{0};
+};
+
 class QnnRuntime {
 public:
     QnnRuntime();
@@ -57,14 +67,23 @@ public:
 
     bool initialize(
         const std::string& contextBinaryPath,
-        const std::string& modelLibraryPath
+        const std::string& modelLibraryPath,
+        const std::string& nativeLibDir
     );
 
+    // Runs the graph. outputs[i] receives the raw (quantized)
+    // bytes of output i, in the order of outputInfos().
     bool execute(
         const uint8_t* inputData,
         size_t inputSize,
-        std::vector<uint8_t>& outputData
+        std::vector<std::vector<uint8_t>>& outputs
     );
+
+    const QnnTensorInfo& inputInfo() const { return inputInfo_; }
+    const std::vector<QnnTensorInfo>& outputInfos() const { return outputInfos_; }
+
+    // Wall time of the last graphExecute() call.
+    double lastExecuteMs() const { return lastExecuteMs_; }
 
     void shutdown();
 
@@ -153,7 +172,11 @@ private:
     uint32_t graphsCount_{0};
 
     Qnn_Tensor_t inputTensor_{};
-    Qnn_Tensor_t outputTensor_{};
+    std::vector<Qnn_Tensor_t> outputTensors_;
+
+    QnnTensorInfo inputInfo_;
+    std::vector<QnnTensorInfo> outputInfos_;
+    double lastExecuteMs_{0.0};
 
     std::string contextBinaryPath_;
     std::string modelLibraryPath_;
