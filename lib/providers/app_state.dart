@@ -209,6 +209,8 @@ class AppState extends ChangeNotifier {
           batteryLevel: (data['battery'] as num?)?.toDouble() ?? 100.0,
           centerDistanceMeters: (data['centerDistance'] as num?)?.toDouble() ?? 0.0,
           droppedFrames: (data['droppedFrames'] as num?)?.toInt() ?? 0,
+          alert: data['alert'] as String? ?? 'none',
+          alertTtc: (data['alertTtc'] as num?)?.toDouble() ?? -1.0,
           imu: data['imu'] is Map<String, dynamic>
               ? ImuData.fromJson(data['imu'] as Map<String, dynamic>)
               : const ImuData(),
@@ -229,6 +231,11 @@ class AppState extends ChangeNotifier {
               distanceMeters: (d['distanceMeters'] as num?)?.toDouble() ?? 0.0,
               directionClock: '',
               boundingBox: bboxList,
+              masked: d['masked'] as bool? ?? false,
+              trackId: (d['track'] as num?)?.toInt() ?? -1,
+              speed: (d['speed'] as num?)?.toDouble() ?? 0.0,
+              approaching: d['approaching'] as bool? ?? false,
+              ttc: (d['ttc'] as num?)?.toDouble() ?? -1.0,
             );
           }).toList();
         } else {

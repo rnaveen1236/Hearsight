@@ -58,6 +58,7 @@ add_library(
         qnn_runtime.cpp
         yolo_detector.cpp
         imu.cpp
+        tracker.cpp
 )
 
 # ============================================================

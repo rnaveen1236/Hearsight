@@ -4,6 +4,11 @@ class DetectionResult {
   final double distanceMeters;
   final String directionClock;
   final List<double> boundingBox; // [x, y, width, height]
+  final bool masked;          // instance mask available (persons)
+  final int trackId;          // -1 until the track is confirmed
+  final double speed;         // m/s
+  final bool approaching;     // closing in on the user
+  final double ttc;           // time-to-collision (s), -1 if not closing
 
   DetectionResult({
     required this.objectName,
@@ -11,6 +16,11 @@ class DetectionResult {
     required this.distanceMeters,
     required this.directionClock,
     required this.boundingBox,
+    this.masked = false,
+    this.trackId = -1,
+    this.speed = 0.0,
+    this.approaching = false,
+    this.ttc = -1.0,
   });
 }
 
@@ -66,6 +76,8 @@ class TelemetryData {
   final int droppedFrames;
   final double usbTransportLatencyMs;
   final double centerDistanceMeters;
+  final String alert;          // "none" | "caution" | "stop" (moving objects)
+  final double alertTtc;       // seconds
   final ImuData imu;
 
   TelemetryData({
@@ -81,6 +93,8 @@ class TelemetryData {
     this.droppedFrames = 0,
     this.usbTransportLatencyMs = 0.0,
     this.centerDistanceMeters = 0.0,
+    this.alert = 'none',
+    this.alertTtc = -1.0,
     this.imu = const ImuData(),
   });
 }

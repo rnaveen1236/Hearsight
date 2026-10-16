@@ -120,6 +120,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                       constraints.biggest,
                                       MediaQuery.of(context).padding.top,
                                     ),
+                                    // Moving-object alert (time-to-collision), below the status bar.
+                                    if (state.telemetry.alert != 'none')
+                                      Positioned(
+                                        top: MediaQuery.of(context).padding.top + 4,
+                                        left: 0,
+                                        right: 0,
+                                        child: Center(child: _motionAlertBanner(state.telemetry)),
+                                      ),
                                     // IMU panel (bottom-right of the RGB view, clear of labels)
                                     Positioned(
                                       bottom: 8,
@@ -237,6 +245,23 @@ class _HomeScreenState extends State<HomeScreen> {
     return Colors.grey;
   }
 
+  // STOP (red) / CAUTION (amber) banner for objects on a collision course.
+  Widget _motionAlertBanner(TelemetryData t) {
+    final stop = t.alert == 'stop';
+    final ttc = t.alertTtc > 0 ? ' · ${t.alertTtc.toStringAsFixed(1)} s' : '';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: stop ? Colors.redAccent : Colors.orangeAccent,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        stop ? 'STOP · object approaching$ttc' : 'CAUTION · object approaching$ttc',
+        style: const TextStyle(color: Colors.black, fontSize: 18, fontWeight: FontWeight.bold),
+      ),
+    );
+  }
+
   // Live D455 IMU readout: orientation + sample rates.
   Widget _imuPanel(ImuData imu) {
     const style = TextStyle(color: Colors.white, fontSize: 12, fontFeatures: [FontFeature.tabularFigures()]);
@@ -310,7 +335,9 @@ class _HomeScreenState extends State<HomeScreen> {
       final distance = det.distanceMeters > 0
           ? '${det.distanceMeters.toStringAsFixed(1)} m'
           : '-- m';
-      final text = '${det.objectName} · $distance';
+      // Approaching objects show their closing speed.
+      final motion = det.approaching ? ' · ↓${det.speed.toStringAsFixed(1)} m/s' : '';
+      final text = '${det.objectName} · $distance$motion';
 
       // Fit the background to the text.
       final painter = TextPainter(
@@ -350,7 +377,9 @@ class _HomeScreenState extends State<HomeScreen> {
           height: labelHeight,
           padding: const EdgeInsets.symmetric(horizontal: padX),
           alignment: Alignment.centerLeft,
-          color: Colors.greenAccent,
+          color: det.approaching
+              ? (det.ttc > 0 && det.ttc < 2.0 ? Colors.redAccent : Colors.orangeAccent)
+              : Colors.greenAccent,
           child: Text(
             text,
             maxLines: 1,

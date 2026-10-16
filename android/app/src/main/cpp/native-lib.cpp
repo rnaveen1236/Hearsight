@@ -18,6 +18,7 @@
 #include "qnn_runtime.h"
 #include "yolo_detector.h"
 #include "imu.h"
+#include "tracker.h"
 
 QnnRuntime g_qnnRuntime;
 YoloDetector g_detector;
@@ -25,6 +26,8 @@ YoloDetector g_detector;
 std::mutex g_qnnMutex;
 std::atomic<bool> g_qnnInitialized(false);
 ImuStreamer g_imu;
+// Track IDs, velocity and time-to-collision for detections (stream thread only).
+ObjectTracker g_tracker;
 rs2::device g_rsDevice;  // the pipeline's active device (shared with the IMU)
 // IMU start is deferred until the colour/depth stream is flowing; see the
 // stream thread. Starting the D455 motion sensor at pipeline start wedged
@@ -98,7 +101,7 @@ std::atomic<double> current_fps(0.0);
 
 // Telemetry state
 std::mutex telemetry_mutex;
-char telemetry_json[8192] = "{}";
+char telemetry_json[12288] = "{}";
 
 // Forward declare the internal librealsense USB device injection method
 extern "C" void Java_com_intel_realsense_librealsense_DeviceWatcher_nAddUsbDevice(JNIEnv *env, jclass type, jstring deviceName, jint fileDescriptor);
@@ -232,6 +235,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
             startPipelineAt(fps);
         }
         g_streamFps = fps;
+        g_tracker.reset();
         g_imuEnabled = imuEnabled;
         LOGI("Streaming colour+depth 640x480 @ %d fps", fps);
 
@@ -429,6 +433,34 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             std::nth_element(samples, samples + n / 2, samples + n);
                             return samples[n / 2];
                         };
+
+                        // Person distance from the instance mask: project the box's
+                        // central-50% corners once (2 searches), map colour->depth
+                        // pixels linearly from them, and take the median depth over
+                        // the mask pixels (background inside the box is ignored).
+                        auto maskDepth = [&](const Detection& d) -> float {
+                            if (!d.hasMask) return 0.0f;
+                            const float ux0 = d.x + 0.25f * d.w, uy0 = d.y + 0.25f * d.h;
+                            const float ux1 = d.x + 0.75f * d.w, uy1 = d.y + 0.75f * d.h;
+                            int x0, y0, x1, y1;
+                            if (!colorToDepthPixel(ux0, uy0, x0, y0) ||
+                                !colorToDepthPixel(ux1, uy1, x1, y1)) {
+                                return 0.0f;
+                            }
+                            const float sx = (x1 - x0) / (ux1 - ux0);
+                            const float sy = (y1 - y0) / (uy1 - uy0);
+                            const uint16_t* z = static_cast<const uint16_t*>(depth_frame.get_data());
+                            const int dw = depth_frame.get_width(), dh = depth_frame.get_height();
+                            const float units = depth_frame.get_units();
+                            DepthSampler fast = [&](float u, float v) -> float {
+                                int dx = static_cast<int>(x0 + (u - ux0) * sx + 0.5f);
+                                int dy = static_cast<int>(y0 + (v - uy0) * sy + 0.5f);
+                                if (dx < 0 || dy < 0 || dx >= dw || dy >= dh) return 0.0f;
+                                uint16_t raw = z[static_cast<size_t>(dy) * dw + dx];
+                                return raw ? raw * units : 0.0f;
+                            };
+                            return maskDistance(fast, d);
+                        };
                         
                         // Dropped Frames Tracking
                         unsigned long long current_frame_num = color_frame.get_frame_number();
@@ -479,6 +511,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                         
                         // --- INFERENCE (NPU) ---
                         std::vector<Detection> detections;
+                        std::vector<TrackInfo> track_info;
                         double inference_ms = 0.0;
                         double depth_ms = 0.0;
 
@@ -541,10 +574,17 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
 
                             auto t_depth = std::chrono::steady_clock::now();
                             for (Detection& d : detections) {
-                                d.distanceM = boxDepth(d);
+                                d.distanceM = maskDepth(d);
+                                if (d.distanceM <= 0.0f) d.distanceM = boxDepth(d);
                             }
                             depth_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - t_depth).count();
+
+                            // --- TRACKING: IDs, velocity, time-to-collision ---
+                            if (calib_ready) {
+                                g_tracker.setIntrinsics(color_intrin.fx, color_intrin.ppx);
+                            }
+                            g_tracker.update(detections, frame_timestamp_ms / 1000.0, track_info);
                         }
 
                         auto t_render = std::chrono::steady_clock::now();
@@ -617,12 +657,16 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 std::string detections_json = "[";
                                 for (size_t i = 0; i < detections.size(); ++i) {
                                     const Detection& d = detections[i];
-                                    char item[192];
+                                    const TrackInfo ti = i < track_info.size() ? track_info[i] : TrackInfo{};
+                                    char item[320];
                                     snprintf(item, sizeof(item),
                                              "%s{\"class\": %d, \"confidence\": %.3f, \"distanceMeters\": %.2f, "
-                                             "\"bbox\": [%.1f, %.1f, %.1f, %.1f]}",
+                                             "\"bbox\": [%.1f, %.1f, %.1f, %.1f], \"masked\": %s, "
+                                             "\"track\": %d, \"speed\": %.2f, \"approaching\": %s, \"ttc\": %.2f}",
                                              i ? ", " : "", d.classId, d.confidence, d.distanceM,
-                                             d.x, d.y, d.w, d.h);
+                                             d.x, d.y, d.w, d.h, d.hasMask ? "true" : "false",
+                                             ti.confirmed ? ti.id : -1, ti.speed,
+                                             ti.approaching ? "true" : "false", ti.ttc);
                                     detections_json += item;
                                 }
                                 detections_json += "]";
@@ -632,9 +676,13 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          "{\"status\": \"streaming\", \"fps\": %.1f, \"p50\": %.1f, \"p95\": 35.0, \"p99\": 45.0, "
                                          "\"cpu\": 30.0, \"gpu\": 15.0, \"npu\": 5.0, \"thermal\": 38.0, "
                                          "\"battery\": 100.0, \"centerDistance\": %.2f, \"droppedFrames\": %d, "
-                                         "\"inferenceMs\": %.1f, \"imu\": %s, \"detections\": %s}",
+                                         "\"inferenceMs\": %.1f, \"imu\": %s, "
+                                         "\"alert\": \"%s\", \"alertTtc\": %.2f, \"detections\": %s}",
                                          current_fps.load(), latency, center_distance, total_dropped_frames,
-                                         inference_ms, imu_json, detections_json.c_str());
+                                         inference_ms, imu_json,
+                                         g_tracker.alert() == MotionAlert::Stop ? "stop"
+                                             : g_tracker.alert() == MotionAlert::Caution ? "caution" : "none",
+                                         g_tracker.alertTtc(), detections_json.c_str());
                                 
                                 ANativeWindow_unlockAndPost(nativeWindow);
                                 double render_ms = std::chrono::duration<double, std::milli>(

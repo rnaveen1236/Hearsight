@@ -577,6 +577,16 @@ class MainActivity : FlutterActivity() {
     // Copy QNN HTP context binary from assets
     // ============================================================
 
+    // Reads an Android system property (e.g. debug.hsv2.*); "" if unset.
+    private fun systemProperty(name: String): String =
+        try {
+            Class.forName("android.os.SystemProperties")
+                .getMethod("get", String::class.java)
+                .invoke(null, name) as String
+        } catch (e: Exception) {
+            ""
+        }
+
     // HTP context binaries are compiled per Hexagon arch.
     // SoC -> arch from the QAIRT 2.47 SoC table.
     private fun qnnContextAssetName(): String {
@@ -594,12 +604,20 @@ class MainActivity : FlutterActivity() {
                 else -> "v81"
             }
 
+        // YOLOv8s-seg (boxes + person masks) by default;
+        // adb shell setprop debug.hsv2.model det -> detection-only model.
+        val model =
+            if (systemProperty("debug.hsv2.model") == "det")
+                "yolov8s_int8"
+            else
+                "yolov8s_seg_int8"
+
         Log.i(
             LOG_TAG,
-            "SoC: $soc -> QNN HTP $arch context binary"
+            "SoC: $soc -> QNN HTP $arch context binary, model $model"
         )
 
-        return "yolov8s_int8_$arch.bin"
+        return "${model}_$arch.bin"
     }
 
     private fun prepareQnnContextBinary(): File {
@@ -1026,10 +1044,35 @@ class MainActivity : FlutterActivity() {
     // Telemetry polling
     // ============================================================
 
+    private var lastAlertVibrationMs = 0L
+
+    // Vibrates on a STOP alert (object on a collision course), at most 1/s.
+    private fun vibrateOnAlert(alert: String) {
+        if (alert != "stop") return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastAlertVibrationMs < 1000) return
+        lastAlertVibrationMs = now
+        try {
+            val vibrator =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                    (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager).defaultVibrator
+                else
+                    @Suppress("DEPRECATION")
+                    (getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator)
+            // STOP: three fast pulses.
+            vibrator.vibrate(
+                android.os.VibrationEffect.createWaveform(longArrayOf(0, 120, 80, 120, 80, 120), -1)
+            )
+        } catch (e: Exception) {
+            Log.w(LOG_TAG, "Vibration failed", e)
+        }
+    }
+
     // Use the phone IMU unless the native D455 IMU is running.
     private fun withPhoneImu(telemetryJson: String): String =
         try {
             val obj = JSONObject(telemetryJson)
+            vibrateOnAlert(obj.optString("alert", "none"))
             val nativeImu = obj.optJSONObject("imu")
             if (nativeImu == null || !nativeImu.optBoolean("running")) {
                 obj.put("imu", phoneImu.toJson())
