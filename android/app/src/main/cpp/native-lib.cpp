@@ -803,6 +803,13 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                     std::chrono::steady_clock::now() - t_render).count();
                                 stats_render_sum += render_ms;
 
+                                // SAFE,t,alert,reason,dist,ttc,floor,camH,pitch,obs,head,drop,unk,stairs,low,sem,segFloor
+                                if (g_timingLogs) LOGI("SAFE,%.2f,%d,%s,%.2f,%.2f,%d,%.2f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
+                                     frame_timestamp_ms / 1000.0, alert_level, alert_reason, alert_dist, alert_ttc,
+                                     safety.floorFound ? 1 : 0, safety.cameraHeight, safety.cameraPitchDeg,
+                                     safety.obstacleDist, safety.headDist, safety.dropDist, safety.unknownDist,
+                                     safety.stairsDist, safety.lowObstacleDist, safety.semanticUsed ? 1 : 0);
+
                                 // E2E,frame,capture->arrive,infer,render,arrive->post,capture->post,dets,depth
                                 double t_post_ms = e2e_now_ms();
                                 if (g_timingLogs) LOGI("E2E,%llu,%.2f,%.2f,%.2f,%.2f,%.2f,%zu,%.2f",

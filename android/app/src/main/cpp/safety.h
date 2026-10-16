@@ -97,6 +97,11 @@ public:
     // pitch rotates the plane but keeps the height, while a wrong fit that
     // mixes two levels changes it.
     float heightTolerance{0.05f};
+    // Plausible eye height of a head-mounted camera on a standing person:
+    // rejects desks / tables (~0.75 m below the eye) as the floor.
+    float eyeHeightMin{1.1f}, eyeHeightMax{2.1f};
+    // No floor for this long -> forget the learned eye height and re-learn.
+    double relearnSec{3.0};
     // Semantics: stairs ahead raise CAUTION within this range; objects
     // labelled as obstacles lower than bodyMinH count from lowObstacleMinH.
     float stairsCautionDist{3.0f};

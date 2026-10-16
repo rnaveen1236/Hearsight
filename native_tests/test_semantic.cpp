@@ -77,6 +77,24 @@ int main(){
             if (useSem && s.name.rfind("empty",0)==0 && alarms) ++fail;
         }
     }
+    // START while looking at a desk: a 0.75 m tabletop fills the view for
+    // the first 2 s, then the user turns to the clear floor. The eye height
+    // must come out at 1.60 m (not 0.85 m above the desk) and stay clear.
+    {
+        SafetyLayer L; SafetyResult r; std::vector<uint16_t> img; std::vector<uint8_t> grid;
+        Scene desk{"desk"}; desk.boxes.push_back({-2.0f,0,0.2f,2.0f,0.75f,4.0f,kSemOther});
+        Scene clear{"clear"};
+        int alarmsAfter = 0;
+        for (int f=0; f<180; f++) {
+            render(f < 60 ? desk : clear, rng, img, grid);
+            r = L.process(img.data(), in, 0.001f, f/30.0);
+            if (f >= 150 && r.state != SafetyState::Clear) ++alarmsAfter;
+        }
+        const bool ok = r.floorFound && std::fabs(r.cameraHeight - CAM_H) < 0.05f && alarmsAfter == 0;
+        printf("%-42s geo  -> %-7s camH %.2f | alarm frames in last 1 s %d  %s\n", "START facing a desk, then clear floor",
+               st(r.state), r.cameraHeight, alarmsAfter, ok ? "OK" : "FAIL");
+        if (!ok) ++fail;
+    }
     printf("semantic false-alarm failures: %d\n", fail);
     return fail;
 }

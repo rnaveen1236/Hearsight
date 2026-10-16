@@ -44,6 +44,13 @@ float ObjectTracker::iou(float ax, float ay, float aw, float ah,
     return uni > 0 ? inter / uni : 0.0f;
 }
 
+bool ObjectTracker::isMover(int cocoClass) {
+    // person, bicycle, car, motorcycle, bus, train, truck, birds..animals (14-23)
+    return cocoClass == 0 || cocoClass == 1 || cocoClass == 2 || cocoClass == 3 ||
+           cocoClass == 5 || cocoClass == 6 || cocoClass == 7 ||
+           (cocoClass >= 14 && cocoClass <= 23);
+}
+
 void ObjectTracker::update(const std::vector<Detection>& dets, double tSec,
                            std::vector<TrackInfo>& info) {
     info.assign(dets.size(), TrackInfo{});
@@ -160,7 +167,9 @@ void ObjectTracker::update(const std::vector<Detection>& dets, double tSec,
         // Closing speed toward the user (the camera at the origin).
         const float range = std::sqrt(ti.x * ti.x + ti.z * ti.z);
         const float closing = range > 0 ? -(ti.x * ti.vx + ti.z * ti.vz) / range : 0.0f;
-        if (ti.confirmed && closing > minClosingSpeed) {
+        // Only things that move on their own; a still chair "approaches" at
+        // the user's own walking speed (ego-motion is not removed yet).
+        if (ti.confirmed && closing > minClosingSpeed && isMover(tr.classId)) {
             ti.approaching = true;
             ti.ttc = range / closing;
             ti.lateralAtImpact = ti.x + ti.vx * ti.ttc;

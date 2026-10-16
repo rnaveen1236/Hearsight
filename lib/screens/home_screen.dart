@@ -131,7 +131,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     // (the top of the view is ceiling; the bottom shows
                                     // the floor, steps and low obstacles).
                                     Positioned(
-                                      top: 64,
+                                      top: 120,
                                       left: 8,
                                       // Tap to zero (level the mount offset).
                                       child: GestureDetector(

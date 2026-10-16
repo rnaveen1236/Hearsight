@@ -76,6 +76,7 @@ private:
         double lastUpdate{0};
     };
 
+    static bool isMover(int cocoClass);
     static float iou(float ax, float ay, float aw, float ah,
                      float bx, float by, float bw, float bh);
 

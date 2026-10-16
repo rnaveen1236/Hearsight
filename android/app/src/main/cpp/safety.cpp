@@ -120,7 +120,7 @@ bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out, bool walkableO
         const float d = -(n[0]*a->x + n[1]*a->y + n[2]*a->z);
         // Camera must be above the floor at a plausible height; once known,
         // close to the learned eye height and continuous with the tracked floor.
-        if (d < 0.3f || d > 2.5f) continue;
+        if (d < eyeHeightMin || d > eyeHeightMax) continue;
         if (learnedHeight_ > 0 && std::fabs(d - learnedHeight_) > heightTolerance) continue;
         if (floor_.valid && std::fabs(d - floor_.d) > floorTrackTolerance) continue;
         // Inliers weighted by nearness: the floor is the surface at the
@@ -238,6 +238,12 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
         }
     } else if (tSec - floorTime_ > floorMemorySec) {
         floor_.valid = false;
+        // Long without a floor: the learned height may be wrong (or the
+        // mount moved). Re-learn from the next stable fits.
+        if (tSec - floorTime_ > relearnSec && learnedHeight_ > 0) {
+            learnedHeight_ = -1;
+            heightSamples_.clear();
+        }
     }
 
     int raw = 0;
