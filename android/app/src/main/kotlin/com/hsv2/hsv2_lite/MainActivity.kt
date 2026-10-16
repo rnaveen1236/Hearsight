@@ -146,6 +146,17 @@ class MainActivity : FlutterActivity() {
     // QNN initialization
     // ============================================================
 
+    // Scene segmentation (DeepLabV3+ ADE20K); runs on its own native thread.
+    @Keep
+    private external fun initSemSeg(
+        contextBinaryPath: String,
+        nativeLibDir: String
+    ): Boolean
+
+    // 0 = camera only, 1 = camera + segmentation overlay.
+    @Keep
+    external fun setViewMode(mode: Int)
+
     @Keep
     private external fun initQnn(
         contextBinaryPath: String,
@@ -356,6 +367,15 @@ class MainActivity : FlutterActivity() {
                         )
                     }
 
+                    result.success(null)
+                }
+
+                "setViewMode" -> {
+                    try {
+                        setViewMode(call.argument<Int>("mode") ?: 1)
+                    } catch (e: Exception) {
+                        Log.e(LOG_TAG, "Native setViewMode failed", e)
+                    }
                     result.success(null)
                 }
 
@@ -590,6 +610,10 @@ class MainActivity : FlutterActivity() {
     // HTP context binaries are compiled per Hexagon arch.
     // SoC -> arch from the QAIRT 2.47 SoC table.
     private fun qnnContextAssetName(): String {
+        return "${qnnModelName()}_${hexagonArch()}.bin"
+    }
+
+    private fun hexagonArch(): String {
 
         val soc =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
@@ -604,6 +628,11 @@ class MainActivity : FlutterActivity() {
                 else -> "v81"
             }
 
+        Log.i(LOG_TAG, "SoC: $soc -> QNN HTP $arch")
+        return arch
+    }
+
+    private fun qnnModelName(): String {
         // YOLOv8s-seg (boxes + person masks) by default;
         // adb shell setprop debug.hsv2.model det -> detection-only model.
         val model =
@@ -612,18 +641,12 @@ class MainActivity : FlutterActivity() {
             else
                 "yolov8s_seg_int8"
 
-        Log.i(
-            LOG_TAG,
-            "SoC: $soc -> QNN HTP $arch context binary, model $model"
-        )
-
-        return "${model}_$arch.bin"
+        return model
     }
 
-    private fun prepareQnnContextBinary(): File {
-
-        val assetName =
-            qnnContextAssetName()
+    private fun prepareQnnContextBinary(
+        assetName: String = qnnContextAssetName()
+    ): File {
 
         val qnnDir =
             File(
@@ -768,6 +791,15 @@ class MainActivity : FlutterActivity() {
                     LOG_TAG,
                     "========================================"
                 )
+
+                // Scene segmentation; adb shell setprop debug.hsv2.semseg 0 disables it.
+                if (systemProperty("debug.hsv2.semseg") != "0") {
+                    val segFile =
+                        prepareQnnContextBinary("deeplab_ade_int8_${hexagonArch()}.bin")
+                    val segOk =
+                        initSemSeg(segFile.absolutePath, applicationInfo.nativeLibraryDir)
+                    Log.i(LOG_TAG, "Scene segmentation init: ${if (segOk) "OK" else "FAILED"}")
+                }
 
             } else {
 

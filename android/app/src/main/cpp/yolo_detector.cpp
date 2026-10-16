@@ -215,8 +215,8 @@ void YoloDetector::decode(const std::vector<std::vector<uint8_t>>& outputs,
     for (size_t i = 0; i < candidates.size() && out.size() < maxDetections; ++i) {
         if (removed[i]) continue;
         out.push_back(candidates[i]);
-        // Instance masks for persons (COCO class 0) only.
-        if (isSegmentation() && candidates[i].classId == 0) {
+        // Instance masks for every detected object.
+        if (isSegmentation()) {
             decodeMask(out.back(), candidateAnchor[i], outputs);
         }
 
@@ -342,9 +342,14 @@ void drawDetections(uint8_t* rgba, int width, int height, int stride,
                     const std::vector<Detection>& dets) {
     const int thickness = 2;
 
-    // Instance masks: tint person pixels (magenta, 45%).
+    // Instance masks: tint each object's pixels (45%), one colour per class;
+    // people stay magenta.
+    static const uint8_t kPalette[8][3] = {
+        {255, 0, 255}, {0, 200, 255}, {255, 160, 0}, {80, 255, 80},
+        {255, 60, 60}, {120, 120, 255}, {255, 255, 0}, {0, 255, 180}};
     for (const Detection& d : dets) {
         if (!d.hasMask) continue;
+        const uint8_t* c = kPalette[d.classId == 0 ? 0 : 1 + (d.classId % 7)];
         for (int my = 0; my < d.maskH; ++my) {
             int py0 = static_cast<int>(d.maskY + my * d.maskCellPx);
             int py1 = std::min(height, static_cast<int>(d.maskY + (my + 1) * d.maskCellPx));
@@ -356,9 +361,9 @@ void drawDetections(uint8_t* rgba, int width, int height, int stride,
                     uint8_t* row = rgba + static_cast<size_t>(y) * stride * 4;
                     for (int x = std::max(0, px0); x < px1; ++x) {
                         uint8_t* p = row + x * 4;
-                        p[0] = static_cast<uint8_t>((p[0] * 55 + 255 * 45) / 100);
-                        p[1] = static_cast<uint8_t>((p[1] * 55) / 100);
-                        p[2] = static_cast<uint8_t>((p[2] * 55 + 255 * 45) / 100);
+                        p[0] = static_cast<uint8_t>((p[0] * 55 + c[0] * 45) / 100);
+                        p[1] = static_cast<uint8_t>((p[1] * 55 + c[1] * 45) / 100);
+                        p[2] = static_cast<uint8_t>((p[2] * 55 + c[2] * 45) / 100);
                     }
                 }
             }

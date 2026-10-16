@@ -60,6 +60,7 @@ add_library(
         imu.cpp
         tracker.cpp
         safety.cpp
+        semseg.cpp
 )
 
 # ============================================================

@@ -20,6 +20,7 @@
 #include "imu.h"
 #include "tracker.h"
 #include "safety.h"
+#include "semseg.h"
 
 QnnRuntime g_qnnRuntime;
 YoloDetector g_detector;
@@ -31,6 +32,10 @@ ImuStreamer g_imu;
 ObjectTracker g_tracker;
 // Layer 1 reactive safety (floor, corridor, head height, drop-off) from live depth.
 SafetyLayer g_safety;
+// Whole-scene semantic segmentation on its own worker thread (~10-15 Hz).
+SemanticSegmenter g_semseg;
+// 0 = camera only, 1 = camera + segmentation overlay.
+std::atomic<int> g_viewMode(1);
 rs2::device g_rsDevice;  // the pipeline's active device (shared with the IMU)
 // IMU start is deferred until the colour/depth stream is flowing; see the
 // stream thread. Starting the D455 motion sensor at pipeline start wedged
@@ -299,6 +304,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
             auto last_time = std::chrono::steady_clock::now();
             int frame_count = 0;
             int consecutive_timeouts = 0;
+            SegMap seg_map;
 
             // Depth auto-recovery state (see kDepthDeadFraction).
             auto depth_dead_since = std::chrono::steady_clock::time_point{};
@@ -551,6 +557,16 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             inference_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - t0).count();
 
+                            // --- SEMANTIC SEGMENTATION (worker thread) ---
+                            // Started right after the detector so it uses the NPU
+                            // gap before the next frame instead of delaying YOLO.
+                            // Every 2nd frame at most; skipped while still busy.
+                            if ((current_frame_num & 1) == 0) {
+                                g_semseg.submit(static_cast<const uint8_t*>(color_frame.get_data()),
+                                                color_frame.get_width(), color_frame.get_height(),
+                                                frame_timestamp_ms / 1000.0);
+                            }
+
                             double npu_ms = g_qnnRuntime.lastExecuteMs();
                             stats_frames++;
                             stats_dets += detections.size();
@@ -582,6 +598,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 LOGI("Loop: wait %.1f ms | render %.1f ms",
                                      stats_wait_sum / stats_frames,
                                      stats_render_sum / stats_frames);
+                                LOGI("SemSeg: %.1f Hz | NPU %.1f ms", g_semseg.hz(), g_semseg.npuMs());
                               }
                                 stats_wait_sum = stats_render_sum = 0.0;
                                 stats_start = stats_now;
@@ -624,6 +641,10 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                         memcpy(out + y * buffer.stride * 4, in + y * width * 4, width * 4);
                                     }
 
+                                    // Segmentation overlay (newest map; it lags by up to ~100 ms).
+                                    if (g_viewMode == 1 && g_semseg.latest(seg_map)) {
+                                        drawSegmentation(out, width, height, buffer.stride, seg_map);
+                                    }
                                     drawDetections(out, width, height, buffer.stride, detections);
                                 }
                                 
@@ -709,6 +730,24 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 }
                                 detections_json += "]";
 
+                                // Segmentation summary: class shares of the lower-middle
+                                // band of the image (the ground just ahead).
+                                char seg_json[256] = "null";
+                                if (seg_map.seq) {
+                                    int counts[kNavCount] = {0}, total = 0;
+                                    for (int y = seg_map.height / 2; y < seg_map.height; ++y)
+                                        for (int x = seg_map.width / 3; x < seg_map.width * 2 / 3; ++x, ++total)
+                                            counts[seg_map.cls[y * seg_map.width + x]]++;
+                                    const float k = total ? 1.0f / total : 0.0f;
+                                    snprintf(seg_json, sizeof(seg_json),
+                                             "{\"hz\": %.1f, \"ms\": %.1f, \"floor\": %.2f, \"stairs\": %.2f, "
+                                             "\"obstacle\": %.2f, \"person\": %.2f, \"door\": %.2f}",
+                                             g_semseg.hz(), g_semseg.npuMs(),
+                                             (counts[kNavFloor] + counts[kNavSidewalk] + counts[kNavRoad]) * k,
+                                             counts[kNavStairs] * k, counts[kNavObstacle] * k,
+                                             counts[kNavPerson] * k, counts[kNavDoor] * k);
+                                }
+
                                 std::lock_guard<std::mutex> lock(telemetry_mutex);
                                 snprintf(telemetry_json, sizeof(telemetry_json),
                                          "{\"status\": \"streaming\", \"fps\": %.1f, \"p50\": %.1f, \"p95\": 35.0, \"p99\": 45.0, "
@@ -717,14 +756,14 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          "\"inferenceMs\": %.1f, \"imu\": %s, "
                                          "\"alert\": \"%s\", \"alertReason\": \"%s\", \"alertDist\": %.2f, \"alertTtc\": %.2f, "
                                          "\"safety\": {\"floor\": %s, \"camHeight\": %.2f, \"pitch\": %.1f, \"ms\": %.2f}, "
-                                         "\"detections\": %s}",
+                                         "\"semseg\": %s, \"viewMode\": %d, \"detections\": %s}",
                                          current_fps.load(), latency, center_distance, total_dropped_frames,
                                          inference_ms, imu_json,
                                          alert_level == 2 ? "stop" : alert_level == 1 ? "caution" : "none",
                                          alert_reason, alert_dist, alert_ttc,
                                          safety.floorFound ? "true" : "false", safety.cameraHeight,
                                          safety.cameraPitchDeg, safety.ms,
-                                         detections_json.c_str());
+                                         seg_json, g_viewMode.load(), detections_json.c_str());
                                 
                                 ANativeWindow_unlockAndPost(nativeWindow);
                                 double render_ms = std::chrono::duration<double, std::milli>(
@@ -802,6 +841,25 @@ Java_com_hsv2_hsv2_1lite_MainActivity_stopPipeline(
         rs_pipe.reset();
     }
     g_rsDevice = rs2::device();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_hsv2_hsv2_1lite_MainActivity_initSemSeg(
+        JNIEnv* env, jobject /* this */, jstring contextBinaryPath, jstring nativeLibDir) {
+    const char* ctx = env->GetStringUTFChars(contextBinaryPath, nullptr);
+    const char* lib = env->GetStringUTFChars(nativeLibDir, nullptr);
+    std::string err;
+    const bool ok = g_semseg.init(ctx, lib, err);
+    if (!ok) LOGE("SemSeg init failed: %s", err.c_str());
+    env->ReleaseStringUTFChars(contextBinaryPath, ctx);
+    env->ReleaseStringUTFChars(nativeLibDir, lib);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_hsv2_hsv2_1lite_MainActivity_setViewMode(
+        JNIEnv* /* env */, jobject /* this */, jint mode) {
+    g_viewMode = mode;
 }
 
 extern "C" JNIEXPORT void JNICALL
