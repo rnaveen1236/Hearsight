@@ -75,7 +75,10 @@ public:
     // Tunables.
     int maxPoints{250};
     int gridCols{16}, gridRows{12};
-    float minEigen{0.0008f};     // corner strength (per-pixel normalised)
+    // Corner strength threshold: relative to the frame's strongest corner,
+    // with an absolute floor (intensity 0..1, per-pixel gradients).
+    float minEigenRel{0.01f};
+    float minEigenAbs{2e-6f};
     float fbMaxErr{1.0f};        // forward-backward check (half-res pixels)
     int ransacIters{80};
     int minInliers{12};
@@ -108,6 +111,9 @@ private:
 // reads the newest result (at most a frame or two old).
 class Recorder;
 
+// Phone IMU sample handed along with a frame (for recordings).
+struct RecImu { bool valid{false}; float up[3]{0, 0, 0}; float gyro[3]{0, 0, 0}; };
+
 class VoThread {
 public:
     // Optional: frames processed by the worker are also written here.
@@ -117,7 +123,8 @@ public:
     void stop();
     bool running() const { return running_; }
     // Copies the frame; dropped if the worker is still busy.
-    void submit(const uint8_t* rgba, const uint16_t* depth, float depthUnits, double tSec);
+    void submit(const uint8_t* rgba, const uint16_t* depth, float depthUnits, double tSec,
+                const RecImu* imu = nullptr);
     // Newest result and the pose at that frame. False if none yet.
     bool latest(VoResult& r, float R[9], float t[3], double& tSec) const;
     void reset();
@@ -135,6 +142,7 @@ private:
     std::vector<uint16_t> depth_;
     float units_{0.001f};
     double t_{0};
+    RecImu imu_{};
     VoResult res_;
     float R_[9]{1, 0, 0, 0, 1, 0, 0, 0, 1}, T_[3]{0, 0, 0};
     double resT_{-1};

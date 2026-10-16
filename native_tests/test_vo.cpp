@@ -17,12 +17,14 @@ static float hash2(int a, int b, int s) {
     h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
     return (h & 0xffff) / 65535.0f;
 }
+static float g_contrast = 1.0f;   // texture contrast (1 = normal, small = plain walls)
 static float texture(float a, float b, int surface) {
     const float tile = 0.2f;
     const int ia = static_cast<int>(std::floor(a / tile)), ib = static_cast<int>(std::floor(b / tile));
     float v = 0.25f + 0.6f * hash2(ia, ib, surface);
     const int ja = static_cast<int>(std::floor(a / 0.05f)), jb = static_cast<int>(std::floor(b / 0.05f));
     v += 0.15f * (hash2(ja, jb, surface + 7) - 0.5f);
+    v = 0.55f + g_contrast * (v - 0.55f);
     return std::max(0.0f, std::min(1.0f, v));
 }
 
@@ -93,11 +95,13 @@ static float depthAt(void* ctx, float u, float v) {
     return d[y * W + x];
 }
 
-struct Motion { const char* name; float speed; float nodDeg; float swayDeg; float yawRate; bool person; double secs; };
+struct Motion { const char* name; float speed; float nodDeg; float swayDeg; float yawRate; bool person; double secs;
+                float contrast = 1.0f; float swayHz = 0.5f; };
 
 static int run(const Motion& m, std::mt19937& rng) {
     VisualOdometry vo;
     vo.setCamera({FX, FY, CX, CY, W, H});
+    g_contrast = m.contrast;
     std::vector<uint8_t> rgba; std::vector<float> depth;
     DepthCtx ctx{&depth};
     double speedErr = 0, msSum = 0; int n = 0, okFrames = 0, frames = 0, inl = 0;
@@ -109,7 +113,7 @@ static int run(const Motion& m, std::mt19937& rng) {
         const float z = 1.0f + m.speed * static_cast<float>(t);
         const float y = 1.6f + 0.03f * std::sin(2 * PI * 2.0f * static_cast<float>(t));
         const float pitch = (25.0f + m.nodDeg * std::sin(2 * PI * 1.0f * static_cast<float>(t))) * PI / 180;
-        const float yaw = (m.swayDeg * std::sin(2 * PI * 0.5f * static_cast<float>(t))) * PI / 180 +
+        const float yaw = (m.swayDeg * std::sin(2 * PI * m.swayHz * static_cast<float>(t))) * PI / 180 +
                           m.yawRate * static_cast<float>(t) * PI / 180;
         P = makePose(0.0f, y, z, yaw, pitch);
         if (f == 0) P0 = P;
@@ -160,6 +164,9 @@ int main() {
         {"walking 1.4 m/s, nods + sway", 1.4f, 10, 8, 0, false, 6},
         {"turning on the spot 45 deg/s", 0.0f, 3, 0, 45, false, 4},
         {"walking 1.0 m/s, person crossing", 1.0f, 7, 5, 0, true, 6},
+        {"walking, plain surfaces (10% contrast)", 1.0f, 7, 5, 0, false, 6, 0.10f},
+        {"walking, plain surfaces (4% contrast)", 1.0f, 7, 5, 0, false, 6, 0.04f},
+        {"walking, head turns +-35 deg @0.8Hz", 1.0f, 7, 35, 0, false, 6, 1.0f, 0.8f},
     };
     int fail = 0;
     for (const Motion& m : cases) fail += run(m, rng);

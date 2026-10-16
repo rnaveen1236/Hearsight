@@ -24,6 +24,8 @@
 #include "semseg.h"
 #include "vo.h"
 #include "recorder.h"
+#include "imu_sync.h"
+#include "gravity_calib.h"
 
 QnnRuntime g_qnnRuntime;
 YoloDetector g_detector;
@@ -39,6 +41,11 @@ SafetyLayer g_safety;
 SemanticSegmenter g_semseg;
 // Visual odometry (Phase 3): the user's own motion; stream thread only.
 VoThread g_vo;
+// Phone IMU on CLOCK_BOOTTIME, matched to each frame's capture time; its
+// gravity (rotated into the camera by an online calibration) pins the floor fit.
+PhoneImuSync g_imuSync;
+GravityCalib g_gravityCalib;
+int64_t g_imuOffsetNs = 0;   // residual camera->IMU offset: setprop debug.hsv2.imu_offset_ms
 // Walk recorder (REC button): started by the stream thread on the next frame
 // once the camera calibration is known (g_recDir set by JNI).
 Recorder g_recorder;
@@ -264,6 +271,12 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
         g_voEnabled = debugPropEnabled("debug.hsv2.vo", true);
         g_safety.reset();
         g_imuEnabled = imuEnabled;
+        {
+            char v[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.hsv2.imu_offset_ms", v);
+            g_imuOffsetNs = static_cast<int64_t>(atof(v) * 1e6);
+        }
+        g_imuSync.start();
         LOGI("Streaming colour+depth 640x480 @ %d fps", fps);
 
         // With the D455 IMU (HID) active, librealsense's background pollers
@@ -567,6 +580,36 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             sem_in.colorW = color_intrin.width; sem_in.colorH = color_intrin.height;
                             sem_ok = true;
                         }
+                        // --- PHONE IMU AT THIS FRAME ---
+                        // Frame capture time on CLOCK_BOOTTIME (the sensors' clock):
+                        // global-time stamps are on the system clock, so shift by "now".
+                        RecImu frame_imu;
+                        {
+                            const bool ts_global = color_frame.get_frame_timestamp_domain() ==
+                                                   RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME;
+                            const int64_t boot_now = bootTimeNs();
+                            int64_t frame_boot = ts_global
+                                ? boot_now - static_cast<int64_t>((e2e_now_ms() - frame_timestamp_ms) * 1e6)
+                                : boot_now;
+                            frame_boot += g_imuOffsetNs;
+                            const ImuAtFrame im = g_imuSync.at(frame_boot);
+                            const float gl = std::sqrt(im.gravity[0] * im.gravity[0] + im.gravity[1] * im.gravity[1] +
+                                                       im.gravity[2] * im.gravity[2]);
+                            if (im.valid && gl > 5.0f) {
+                                frame_imu.valid = true;
+                                for (int i = 0; i < 3; ++i) {
+                                    frame_imu.up[i] = im.gravity[i] / gl;   // TYPE_GRAVITY points up
+                                    frame_imu.gyro[i] = im.gyro[i];
+                                }
+                            }
+                        }
+                        float cam_up[3];
+                        if (frame_imu.valid && g_gravityCalib.toCamera(frame_imu.up, cam_up)) {
+                            g_safety.setGravity(-cam_up[0], -cam_up[1], -cam_up[2]);
+                        } else {
+                            g_safety.clearGravity();
+                        }
+
                         // User's own motion (odometry of the previous frame, 33 ms old).
                         g_safety.setEgoVelocity(vo_res.ok, vo_res.vel);
                         if (depth_frame && calib_ready) {
@@ -577,6 +620,13 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 static_cast<const uint16_t*>(depth_frame.get_data()), din,
                                 depth_frame.get_units(), frame_timestamp_ms / 1000.0,
                                 sem_ok ? &sem_in : nullptr);
+                            // Calibration pairs: phone up vs the measured floor normal,
+                            // only on steady frames (slow head motion, floor found).
+                            const float wr = std::sqrt(frame_imu.gyro[0] * frame_imu.gyro[0] +
+                                                       frame_imu.gyro[1] * frame_imu.gyro[1] +
+                                                       frame_imu.gyro[2] * frame_imu.gyro[2]);
+                            if (frame_imu.valid && safety.floorFound && wr < 0.5f)
+                                g_gravityCalib.add(frame_imu.up, safety.floorNormal, frame_timestamp_ms / 1000.0);
                         }
 
                         // --- INFERENCE (NPU) ---
@@ -648,6 +698,11 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                     LOGI("VO: %d results/s, ok %d | speed avg %.2f m/s | %.1f ms on its thread (incl. depth registration) | inliers %d/%d tracked %d",
                                          vo_ok, vo_frames, vo_speed_sum / vo_frames, vo_ms_sum / vo_frames,
                                          vo_res.inliers, vo_res.withDepth, vo_res.tracked);
+                                LOGI("IMU: phone %s | calibration %s: %d pairs, spread %.1f deg, residual %.2f deg | gravity in floor fit: %s",
+                                     frame_imu.valid ? "synced" : "NOT synced",
+                                     g_gravityCalib.ok() ? "OK" : "pending", g_gravityCalib.samples(),
+                                     g_gravityCalib.spreadDeg(), g_gravityCalib.residualDeg(),
+                                     safety.gravityUsed ? "yes" : "no");
                                 vo_frames = vo_ok = 0;
                                 vo_ms_sum = vo_speed_sum = 0;
                               }
@@ -715,7 +770,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 }
                                 g_vo.submit(static_cast<const uint8_t*>(color_frame.get_data()),
                                             static_cast<const uint16_t*>(depth_frame.get_data()),
-                                            depth_frame.get_units(), frame_timestamp_ms / 1000.0);
+                                            depth_frame.get_units(), frame_timestamp_ms / 1000.0, &frame_imu);
                             }
                             double vo_t = -1;
                             const double prev_vo_t = vo_last_t;
@@ -878,6 +933,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          "\"semseg\": %s, \"viewMode\": %d, "
                                          "\"vo\": {\"ok\": %s, \"speed\": %.2f, \"turn\": %.1f, \"inliers\": %d, \"ms\": %.1f}, "
                                          "\"rec\": {\"on\": %s, \"frames\": %d, \"mb\": %.0f, \"dropped\": %d}, "
+                                         "\"imuCal\": {\"synced\": %s, \"ok\": %s, \"pairs\": %d, \"residual\": %.2f, \"gravity\": %s}, "
                                          "\"detections\": %s}",
                                          current_fps.load(), latency, center_distance, total_dropped_frames,
                                          inference_ms, imu_json,
@@ -889,7 +945,10 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          vo_res.ok ? "true" : "false", vo_res.speed, vo_res.angRate * 57.2958f,
                                          vo_res.inliers, vo_res.ms,
                                          g_recorder.active() ? "true" : "false", g_recorder.frames(),
-                                         g_recorder.megabytes(), g_recorder.dropped(), detections_json.c_str());
+                                         g_recorder.megabytes(), g_recorder.dropped(),
+                                         frame_imu.valid ? "true" : "false", g_gravityCalib.ok() ? "true" : "false",
+                                         g_gravityCalib.samples(), g_gravityCalib.residualDeg(),
+                                         safety.gravityUsed ? "true" : "false", detections_json.c_str());
                                 
                                 ANativeWindow_unlockAndPost(nativeWindow);
                                 double render_ms = std::chrono::duration<double, std::milli>(
@@ -971,6 +1030,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_stopPipeline(
 
     g_imuPending = false;
     g_imu.stop();
+    g_imuSync.stop();
     g_vo.stop();
     g_vo.setRecorder(nullptr);
     if (g_recorder.active()) {

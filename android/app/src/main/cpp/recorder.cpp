@@ -1,5 +1,6 @@
 #include "recorder.h"
 
+#include <cstddef>
 #include <cstring>
 
 bool Recorder::start(const std::string& path, const RecHeader& h) {
@@ -9,7 +10,7 @@ bool Recorder::start(const std::string& path, const RecHeader& h) {
     // Large stdio buffer: one write per ~frame.
     std::setvbuf(file_, nullptr, _IOFBF, 1 << 20);
     h_ = h;
-    std::memcpy(h_.magic, "HSVREC1", 8);
+    std::memcpy(h_.magic, "HSVREC2", 8);
     std::fwrite(&h_, sizeof(h_), 1, file_);
     path_ = path;
     frames_ = 0;
@@ -37,7 +38,7 @@ void Recorder::stop() {
 }
 
 void Recorder::push(double t, const uint8_t* gray, const uint16_t* depthFull, const VoResult& r,
-                    const float pose[3]) {
+                    const float pose[3], const RecImu& imu) {
     if (!active_) return;
     Item it;
     it.f.t = t;
@@ -47,6 +48,8 @@ void Recorder::push(double t, const uint8_t* gray, const uint16_t* depthFull, co
     it.f.inliers = r.inliers;
     it.f.tracked = r.tracked;
     it.f.withDepth = r.withDepth;
+    it.f.imuValid = imu.valid ? 1 : 0;
+    for (int i = 0; i < 3; ++i) { it.f.phoneUp[i] = imu.up[i]; it.f.gyro[i] = imu.gyro[i]; }
     it.gray.assign(gray, gray + static_cast<size_t>(h_.grayW) * h_.grayH);
     it.depth.resize(static_cast<size_t>(h_.depW) * h_.depH);
     const int dw = h_.reg.dw;
@@ -83,11 +86,16 @@ bool RecReader::open(const char* path) {
     f = std::fopen(path, "rb");
     if (!f) return false;
     if (std::fread(&h, sizeof(h), 1, f) != 1) return false;
-    return std::memcmp(h.magic, "HSVREC1", 7) == 0;
+    if (std::memcmp(h.magic, "HSVREC2", 7) == 0) version = 2;
+    else if (std::memcmp(h.magic, "HSVREC1", 7) == 0) version = 1;
+    return version > 0;
 }
 
 bool RecReader::next(RecFrame& fr, std::vector<uint8_t>& gray, std::vector<uint16_t>& depth) {
-    if (std::fread(&fr, sizeof(fr), 1, f) != 1) return false;
+    // Version 1 frames end before the IMU fields.
+    const size_t frameSize = version == 1 ? offsetof(RecFrame, imuValid) : sizeof(RecFrame);
+    fr = RecFrame{};
+    if (std::fread(&fr, frameSize, 1, f) != 1) return false;
     gray.resize(static_cast<size_t>(h.grayW) * h.grayH);
     depth.resize(static_cast<size_t>(h.depW) * h.depH);
     if (std::fread(gray.data(), 1, gray.size(), f) != gray.size()) return false;

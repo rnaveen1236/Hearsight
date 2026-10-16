@@ -25,7 +25,7 @@
  */
 #pragma pack(push, 1)
 struct RecHeader {
-    char magic[8];          // "HSVREC1\0"
+    char magic[8];          // "HSVREC2\0" ("HSVREC1": no IMU fields in RecFrame)
     int32_t grayW, grayH;   // half-res colour
     int32_t depW, depH;     // depth subsampled by 2
     float depthUnits;
@@ -40,8 +40,13 @@ struct RecFrame {
     float angRate;
     int32_t inliers, tracked, withDepth;
     float pose[3];
+    // Phone IMU at the frame time (version 2).
+    uint8_t imuValid;
+    float phoneUp[3];       // unit "up" in phone axes
+    float gyro[3];          // rad/s, phone axes
 };
 #pragma pack(pop)
+
 
 class Recorder {
 public:
@@ -51,7 +56,8 @@ public:
     void stop();
     bool active() const { return active_; }
     // Copies the frame into the queue (depth: full-res; subsampled here).
-    void push(double t, const uint8_t* gray, const uint16_t* depthFull, const VoResult& r, const float pose[3]);
+    void push(double t, const uint8_t* gray, const uint16_t* depthFull, const VoResult& r, const float pose[3],
+              const RecImu& imu);
 
     int frames() const { return frames_; }
     int dropped() const { return dropped_; }
@@ -80,6 +86,7 @@ private:
 struct RecReader {
     std::FILE* f{nullptr};
     RecHeader h{};
+    int version{0};
     bool open(const char* path);
     // Next frame; false at end of file.
     bool next(RecFrame& fr, std::vector<uint8_t>& gray, std::vector<uint16_t>& depth);

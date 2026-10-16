@@ -173,10 +173,16 @@ void VisualOdometry::detect(const std::vector<Level>& pyr) {
         const int r = std::min(gridRows - 1, static_cast<int>(t.y) / ch);
         occupied[r * gridCols + c]++;
     }
-    for (int r = 0; r < gridRows && static_cast<int>(tracks_.size()) < maxPoints; ++r) {
-        for (int c = 0; c < gridCols && static_cast<int>(tracks_.size()) < maxPoints; ++c) {
+    // Best corner per free cell (Shi-Tomasi min eigenvalue), then a threshold
+    // relative to the strongest corner of the frame so plain walls / floors
+    // still give points, with a small absolute floor against sensor noise.
+    struct Cand { float e, x, y; };
+    std::vector<Cand> best(gridCols * gridRows, Cand{0, -1, -1});
+    float frameMax = 0;
+    for (int r = 0; r < gridRows; ++r) {
+        for (int c = 0; c < gridCols; ++c) {
             if (occupied[r * gridCols + c] >= 2) continue;
-            float best = minEigen, bx = -1, by = -1;
+            Cand& bc = best[r * gridCols + c];
             for (int y = std::max(r * ch, static_cast<int>(kMargin));
                  y < std::min((r + 1) * ch, L.h - static_cast<int>(kMargin)); y += 2) {
                 for (int x = std::max(c * cw, static_cast<int>(kMargin));
@@ -191,11 +197,16 @@ void VisualOdometry::detect(const std::vector<Level>& pyr) {
                         }
                     a /= 25; b /= 25; d /= 25;
                     const float e = static_cast<float>(0.5 * (a + d - std::sqrt((a - d) * (a - d) + 4 * b * b)));
-                    if (e > best) { best = e; bx = static_cast<float>(x); by = static_cast<float>(y); }
+                    if (e > bc.e) bc = {e, static_cast<float>(x), static_cast<float>(y)};
                 }
             }
-            if (bx >= 0) tracks_.push_back({bx, by, {0, 0, 0}, false});
+            frameMax = std::max(frameMax, bc.e);
         }
+    }
+    const float thr = std::max(minEigenAbs, minEigenRel * frameMax);
+    for (const Cand& bc : best) {
+        if (static_cast<int>(tracks_.size()) >= maxPoints) break;
+        if (bc.x >= 0 && bc.e > thr) tracks_.push_back({bc.x, bc.y, {0, 0, 0}, false});
     }
 }
 
@@ -370,13 +381,15 @@ void VoThread::reset() {
     resT_ = -1;
 }
 
-void VoThread::submit(const uint8_t* rgba, const uint16_t* depth, float depthUnits, double tSec) {
+void VoThread::submit(const uint8_t* rgba, const uint16_t* depth, float depthUnits, double tSec,
+                      const RecImu* imu) {
     std::unique_lock<std::mutex> lk(m_);
     if (!running_ || busy_ || pending_) return;
     rgba_.assign(rgba, rgba + static_cast<size_t>(reg_.cw) * reg_.ch * 4);
     depth_.assign(depth, depth + static_cast<size_t>(reg_.dw) * reg_.dh);
     units_ = depthUnits;
     t_ = tSec;
+    imu_ = imu ? *imu : RecImu{};
     pending_ = true;
     lk.unlock();
     cv_.notify_one();
@@ -400,6 +413,7 @@ void VoThread::loop() {
     for (;;) {
         double t;
         float units;
+        RecImu imu;
         {
             std::unique_lock<std::mutex> lk(m_);
             cv_.wait(lk, [&] { return quit_ || pending_; });
@@ -408,6 +422,7 @@ void VoThread::loop() {
             depth.swap(depth_);
             t = t_;
             units = units_;
+            imu = imu_;
             pending_ = false;
             busy_ = true;
             if (resetReq_) { vo_.reset(); resetReq_ = false; }
@@ -422,7 +437,7 @@ void VoThread::loop() {
                                      return depthHalfAt(*x->m, x->w, x->h, u, v);
                                  }, &ctx);
         r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        if (rec_ && rec_->active()) rec_->push(t, gray.data(), depth.data(), r, vo_.poseT());
+        if (rec_ && rec_->active()) rec_->push(t, gray.data(), depth.data(), r, vo_.poseT(), imu);
         std::lock_guard<std::mutex> lk(m_);
         res_ = r;
         for (int i = 0; i < 9; ++i) R_[i] = vo_.poseR()[i];
