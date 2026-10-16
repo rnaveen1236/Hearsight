@@ -50,6 +50,8 @@ struct SafetyResult {
     float dropDist{-1};
     float unknownDist{-1};
     float stairsDist{-1};
+    float closingSpeed{0};     // m/s toward the nearest obstacle (smoothed)
+    float stopDistUsed{0};     // effective STOP distance this frame
     float lowObstacleDist{-1};
     bool semanticUsed{false};
     int points{0};
@@ -109,6 +111,16 @@ public:
     float lowObstacleMinH{0.04f};
     int minWalkableForFit{150};
     double holdSec{0.5};
+    // A STOP obstacle that leaves the camera view (head raised) is held this
+    // long, unless the place where it was is visible again and empty.
+    double outOfViewHoldSec{2.0};
+    // Speed-dependent stopping distance: stop = max(stopDist, margin +
+    // closing speed * reaction time); caution starts cautionExtra further.
+    float stopMargin{0.5f}, reactionSec{0.8f}, cautionExtra{1.3f};
+    // Drop-offs: the floor fit must match the learned eye height (a wrong
+    // fit makes the real floor look lower), and a drop must be seen in
+    // dropConfirm of the last 6 frames.
+    int dropConfirm{4};
     double floorMemorySec{1.0};
 
 private:
@@ -127,6 +139,18 @@ private:
     double floorTime_{-1e9};
     bool haveGravity_{false};
     float gx_{0}, gy_{1}, gz_{0};
+
+    // Out-of-view memory of the last near obstacle.
+    float memoDist_{-1};
+    double memoTime_{-1e9};
+    SafetyReason memoReason_{SafetyReason::None};
+    // Closing-speed estimate from the nearest obstacle distance.
+    float prevNearest_{-1};
+    double prevNearestTime_{0};
+    float closing_{0};
+    // Drop-off confirmation history.
+    int dropHist_[6]{0, 0, 0, 0, 0, 0};
+    int dropIdx_{0};
 
     // Confirmation / hold.
     int history_[3]{0, 0, 0};

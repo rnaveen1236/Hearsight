@@ -59,6 +59,12 @@ void SafetyLayer::reset() {
     histIdx_ = 0;
     held_ = SafetyResult{};
     heldUntil_ = -1e9;
+    memoDist_ = -1;
+    memoTime_ = -1e9;
+    prevNearest_ = -1;
+    closing_ = 0;
+    for (int& d : dropHist_) d = 0;
+    dropIdx_ = 0;
     heightSamples_.clear();
     learnedHeight_ = -1;
 }
@@ -266,6 +272,7 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
             }
         }
         if (close >= 20) consider(2, SafetyReason::Obstacle, nearest);
+        else if (memoDist_ > 0 && tSec - memoTime_ < outOfViewHoldSec) consider(2, memoReason_, memoDist_);
         else consider(1, SafetyReason::NoFloor, -1);
     } else {
         r.floorFound = true;
@@ -359,12 +366,68 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
             if (inView && any[b] == 0) { r.unknownDist = a; break; }
         }
 
+        // Drop-off guards: trust a drop only when the floor fit sits at the
+        // learned eye height, and when it persists over several frames.
+        if (r.dropDist >= 0 && learnedHeight_ > 0 &&
+            std::fabs(floor_.d - learnedHeight_) > heightTolerance) {
+            r.dropDist = -1;
+        }
+        dropHist_[dropIdx_] = r.dropDist >= 0 ? 1 : 0;
+        dropIdx_ = (dropIdx_ + 1) % 6;
+        int dropSeen = 0;
+        for (int d : dropHist_) dropSeen += d;
+        if (dropSeen < dropConfirm) r.dropDist = -1;
+
+        // Closing speed toward the nearest body / head obstacle.
+        float nearest = -1;
+        if (r.obstacleDist >= 0) nearest = r.obstacleDist;
+        if (r.headDist >= 0 && (nearest < 0 || r.headDist < nearest)) nearest = r.headDist;
+        if (nearest >= 0 && prevNearest_ >= 0 && tSec > prevNearestTime_) {
+            const float dd = prevNearest_ - nearest;
+            const float dt = static_cast<float>(tSec - prevNearestTime_);
+            // Ignore jumps to a different object.
+            if (std::fabs(dd) < 0.5f && dt < 0.3f) {
+                const float v = std::max(0.0f, std::min(3.0f, dd / dt));
+                closing_ = 0.8f * closing_ + 0.2f * v;
+            }
+        } else if (nearest < 0) {
+            closing_ *= 0.9f;
+        }
+        prevNearest_ = nearest;
+        prevNearestTime_ = tSec;
+        r.closingSpeed = closing_;
+        const float stopD = std::max(stopDist, stopMargin + closing_ * reactionSec);
+        const float cautionD = std::max(cautionDist, stopD + cautionExtra);
+        r.stopDistUsed = stopD;
+
         // 7a. Raw decision.
         auto level = [&](float dist, float stop, float caution) {
             return dist < 0 ? 0 : dist < stop ? 2 : dist < caution ? 1 : 0;
         };
-        consider(level(r.obstacleDist, stopDist, cautionDist), SafetyReason::Obstacle, r.obstacleDist);
-        consider(level(r.headDist, stopDist, cautionDist), SafetyReason::HeadHeight, r.headDist);
+        consider(level(r.obstacleDist, stopD, cautionD), SafetyReason::Obstacle, r.obstacleDist);
+        consider(level(r.headDist, stopD, cautionD), SafetyReason::HeadHeight, r.headDist);
+
+        // Out-of-view memory: remember a near obstacle; if it is no longer
+        // detected because its place on the floor left the view (head
+        // raised), keep the STOP for outOfViewHoldSec.
+        if (nearest >= 0 && nearest < stopD) {
+            memoDist_ = nearest;
+            memoTime_ = tSec;
+            memoReason_ = (r.headDist >= 0 && r.headDist <= nearest) ? SafetyReason::HeadHeight
+                                                                     : SafetyReason::Obstacle;
+        } else if (memoDist_ > 0 && tSec - memoTime_ < outOfViewHoldSec) {
+            const float a = memoDist_;
+            const float q[3] = {-floor_.d * n[0] + a * f[0], -floor_.d * n[1] + a * f[1],
+                                -floor_.d * n[2] + a * f[2]};
+            bool inView = false;
+            if (q[2] > 0.1f) {
+                const float u = in.fx * q[0] / q[2] + in.ppx;
+                const float v = in.fy * q[1] / q[2] + in.ppy;
+                inView = u >= 0 && u < in.width && v >= 0 && v < in.height;
+            }
+            if (inView) memoDist_ = -1;   // visible again and clear: forget it
+            else consider(2, memoReason_, memoDist_);
+        }
         // A drop with stairs labelled near it is reported as stairs.
         const bool dropIsStairs = r.dropDist >= 0 && r.stairsDist >= 0 &&
                                   std::fabs(r.stairsDist - r.dropDist) < 0.6f;
