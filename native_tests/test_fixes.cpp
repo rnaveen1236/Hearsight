@@ -86,7 +86,18 @@ int main(){
             if (r.state==SafetyState::Stop) { stopAt[k]=z; break; } }
         printf("3 approach a box at %.1f m/s           : first STOP at %.2f m\n", v, stopAt[k]);
     }
-    const bool speedOk = stopAt[0]>=1.0f && stopAt[0]<=1.35f && stopAt[1]>=1.5f;
+    // Same 1.5 m/s approach, but the box is missed on every other frame
+    // (seen on the phone: detection at the point-count threshold).
+    float stopFlicker=-1;
+    {
+        SafetyLayer L; PITCH=27*DEG; CAM_H=1.6f;
+        for (int f=0; f<400; ++f) { double t=f/30.0; float z=4.0f-1.5f*(float)t; if (z<0.4f) break;
+            Scene s{"box"}; if (f%2==0) s.boxes.push_back({-0.25f,0,z,0.25f,0.5f,z+0.4f});
+            auto img=render(s,rng); auto r=L.process(img.data(),in,0.001f,t);
+            if (r.state==SafetyState::Stop) { stopFlicker=z; break; } }
+        printf("3 1.5 m/s, box seen every other frame : first STOP at %.2f m\n", stopFlicker);
+    }
+    const bool speedOk = stopAt[0]>=1.0f && stopAt[0]<=1.35f && stopAt[1]>=1.5f && stopFlicker>=1.45f;
     printf("  speed-dependent STOP                : %s\n", speedOk?"OK":"FAIL");
     if (!speedOk) ++fail;
     printf("walk-fix failures: %d\n", fail);

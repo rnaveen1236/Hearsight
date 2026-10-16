@@ -61,8 +61,10 @@ void SafetyLayer::reset() {
     heldUntil_ = -1e9;
     memoDist_ = -1;
     memoTime_ = -1e9;
-    prevNearest_ = -1;
+    nearHist_.clear();
     closing_ = 0;
+    lastObs_ = lastHead_ = -1;
+    lastObsTime_ = lastHeadTime_ = -1e9;
     for (int& d : dropHist_) d = 0;
     dropIdx_ = 0;
     heightSamples_.clear();
@@ -255,10 +257,18 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
     int raw = 0;
     SafetyReason rawReason = SafetyReason::None;
     float rawDist = -1;
+    // Real hazards outrank "can't see the floor" at the same level, then
+    // the nearer one wins.
+    auto weak = [](SafetyReason w) {
+        return w == SafetyReason::UnknownFloor || w == SafetyReason::NoFloor;
+    };
     auto consider = [&](int level, SafetyReason why, float dist) {
-        if (level > raw || (level == raw && level > 0 && dist >= 0 && (rawDist < 0 || dist < rawDist))) {
-            raw = level; rawReason = why; rawDist = dist;
+        bool better = level > raw;
+        if (!better && level == raw && level > 0) {
+            if (weak(rawReason) != weak(why)) better = !weak(why);
+            else better = dist >= 0 && (rawDist < 0 || dist < rawDist);
         }
+        if (better) { raw = level; rawReason = why; rawDist = dist; }
     };
 
     if (!floor_.valid) {
@@ -378,23 +388,39 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
         for (int d : dropHist_) dropSeen += d;
         if (dropSeen < dropConfirm) r.dropDist = -1;
 
-        // Closing speed toward the nearest body / head obstacle.
+        // Short persistence: an obstacle at the point-count threshold is
+        // missed on some frames; keep the last detection for persistSec.
+        if (r.obstacleDist >= 0) { lastObs_ = r.obstacleDist; lastObsTime_ = tSec; }
+        else if (tSec - lastObsTime_ < persistSec) r.obstacleDist = lastObs_;
+        if (r.headDist >= 0) { lastHead_ = r.headDist; lastHeadTime_ = tSec; }
+        else if (tSec - lastHeadTime_ < persistSec) r.headDist = lastHead_;
+
+        // Closing speed toward the nearest body / head obstacle: slope of a
+        // line fitted to the distances of the last speedWindowSec.
         float nearest = -1;
         if (r.obstacleDist >= 0) nearest = r.obstacleDist;
         if (r.headDist >= 0 && (nearest < 0 || r.headDist < nearest)) nearest = r.headDist;
-        if (nearest >= 0 && prevNearest_ >= 0 && tSec > prevNearestTime_) {
-            const float dd = prevNearest_ - nearest;
-            const float dt = static_cast<float>(tSec - prevNearestTime_);
-            // Ignore jumps to a different object.
-            if (std::fabs(dd) < 0.5f && dt < 0.3f) {
-                const float v = std::max(0.0f, std::min(3.0f, dd / dt));
-                closing_ = 0.8f * closing_ + 0.2f * v;
-            }
-        } else if (nearest < 0) {
-            closing_ *= 0.9f;
+        if (nearest >= 0) {
+            // A jump to a different (farther / much nearer) object restarts the fit.
+            if (!nearHist_.empty() && std::fabs(nearHist_.back().second - nearest) > 0.5f)
+                nearHist_.clear();
+            nearHist_.push_back({tSec, nearest});
         }
-        prevNearest_ = nearest;
-        prevNearestTime_ = tSec;
+        while (!nearHist_.empty() && tSec - nearHist_.front().first > speedWindowSec)
+            nearHist_.erase(nearHist_.begin());
+        float v = 0;
+        if (nearHist_.size() >= 5 && nearHist_.back().first - nearHist_.front().first > 0.3) {
+            double st = 0, sd = 0, stt = 0, std_ = 0;
+            const double t0 = nearHist_.front().first;
+            for (const auto& h : nearHist_) {
+                const double t = h.first - t0;
+                st += t; sd += h.second; stt += t * t; std_ += t * h.second;
+            }
+            const double k = static_cast<double>(nearHist_.size());
+            const double den = k * stt - st * st;
+            if (den > 1e-9) v = static_cast<float>(-(k * std_ - st * sd) / den);
+        }
+        closing_ = std::max(0.0f, std::min(3.0f, v));
         r.closingSpeed = closing_;
         const float stopD = std::max(stopDist, stopMargin + closing_ * reactionSec);
         const float cautionD = std::max(cautionDist, stopD + cautionExtra);

@@ -121,6 +121,10 @@ public:
     // fit makes the real floor look lower), and a drop must be seen in
     // dropConfirm of the last 6 frames.
     int dropConfirm{4};
+    // An obstacle missed for a frame or two (point count at the threshold)
+    // is kept this long; closing speed is fitted over speedWindowSec.
+    double persistSec{0.3};
+    double speedWindowSec{1.0};
     double floorMemorySec{1.0};
 
 private:
@@ -144,10 +148,13 @@ private:
     float memoDist_{-1};
     double memoTime_{-1e9};
     SafetyReason memoReason_{SafetyReason::None};
-    // Closing-speed estimate from the nearest obstacle distance.
-    float prevNearest_{-1};
-    double prevNearestTime_{0};
+    // Recent nearest-obstacle distances (time, metres) for the closing
+    // speed (line fit over speedWindowSec, robust to missed frames).
+    std::vector<std::pair<double, float>> nearHist_;
     float closing_{0};
+    // Short obstacle persistence: last body / head detection.
+    float lastObs_{-1}, lastHead_{-1};
+    double lastObsTime_{-1e9}, lastHeadTime_{-1e9};
     // Drop-off confirmation history.
     int dropHist_[6]{0, 0, 0, 0, 0, 0};
     int dropIdx_{0};
