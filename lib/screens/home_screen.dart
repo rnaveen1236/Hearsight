@@ -190,7 +190,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   // Status & Metrics Column
-                  Column(
+                  Expanded(child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
@@ -208,26 +208,43 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                       const SizedBox(height: 8),
-                      Text('FPS: ${state.telemetry.fps.toStringAsFixed(1)} | Latency: ${state.telemetry.p95LatencyMs.toStringAsFixed(1)}ms', style: const TextStyle(color: Colors.white70)),
+                      Text('FPS ${state.telemetry.fps.toStringAsFixed(0)} · ${state.telemetry.p95LatencyMs.toStringAsFixed(0)} ms', style: const TextStyle(color: Colors.white70)),
                       if (state.streamError != null)
                         Padding(
                           padding: const EdgeInsets.only(top: 4),
                           child: Text(state.streamError!, style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
                         ),
                     ],
-                  ),
+                  )),
                   
                   // Removed Stage Config Dropdown per user request
                   
-                  // Start / Stop Button
+                  // View switch (camera / overlay / segmentation) + Start / Stop
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                  OutlinedButton.icon(
+                    onPressed: () => context.read<AppState>().cycleViewMode(),
+                    icon: const Icon(Icons.layers),
+                    label: Text(AppState.viewModeLabels[state.viewMode]),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: Colors.white54),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   ElevatedButton.icon(
                     onPressed: state.isCameraConnected ? () => context.read<AppState>().togglePipeline() : null,
                     icon: Icon(state.isPipelineRunning ? Icons.stop : Icons.play_arrow),
                     label: Text(state.isPipelineRunning ? 'STOP' : 'START'),
                     style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
                       backgroundColor: state.isPipelineRunning ? Colors.red : Colors.teal,
                       foregroundColor: Colors.white,
                     ),
+                  ),
+                    ],
                   ),
                 ],
               ),
@@ -254,6 +271,7 @@ class _HomeScreenState extends State<HomeScreen> {
       'obstacle' => 'obstacle ahead$dist',
       'head' => 'head-height obstacle$dist',
       'dropoff' => 'step down$dist',
+      'stairs' => 'stairs ahead$dist',
       'unknown' => 'unknown ground$dist',
       'nofloor' => 'cannot see the floor',
       'moving' => 'object approaching$ttc',

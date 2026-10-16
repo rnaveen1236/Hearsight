@@ -113,6 +113,22 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Camera view: 0 = camera only, 1 = camera + segmentation overlay,
+  /// 2 = segmentation only.
+  int viewMode = 1;
+  static const viewModeLabels = ['CAM', 'MIX', 'SEG'];
+
+  Future<void> cycleViewMode() async {
+    viewMode = (viewMode + 1) % 3;
+    notifyListeners();
+    if (kIsWeb) return;
+    try {
+      await _commandChannel.invokeMethod('setViewMode', {'mode': viewMode});
+    } on PlatformException catch (e) {
+      debugPrint("Failed to set view mode: '${e.message}'.");
+    }
+  }
+
   /// Use the current orientation as level (phone IMU mount offset).
   Future<void> zeroImu() async {
     if (kIsWeb) return;

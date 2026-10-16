@@ -20,7 +20,21 @@
  *  7. STOP / CAUTION with frame confirmation and a short hold.
  */
 enum class SafetyState { Clear = 0, Caution = 1, Stop = 2 };
-enum class SafetyReason { None = 0, Obstacle, HeadHeight, DropOff, UnknownFloor, NoFloor };
+enum class SafetyReason { None = 0, Obstacle, HeadHeight, DropOff, UnknownFloor, NoFloor, Stairs };
+
+// Per-cell semantic role from the scene segmentation (optional input).
+enum SemRole : uint8_t { kSemOther = 0, kSemWalkable, kSemStairs, kSemObstacle };
+
+// Semantic label grid in colour-image coordinates plus the depth->colour
+// projection used to look up the role of each depth point.
+struct SemanticInput {
+    const uint8_t* roles{nullptr};   // SemRole per cell, row-major
+    int gridW{0}, gridH{0};
+    float rot[9]{1, 0, 0, 0, 1, 0, 0, 0, 1};  // depth->colour, column-major (rs2_extrinsics)
+    float trans[3]{0, 0, 0};
+    float fx{0}, fy{0}, ppx{0}, ppy{0};       // colour intrinsics
+    int colorW{0}, colorH{0};
+};
 
 struct SafetyResult {
     SafetyState state{SafetyState::Clear};
@@ -35,6 +49,9 @@ struct SafetyResult {
     float headDist{-1};
     float dropDist{-1};
     float unknownDist{-1};
+    float stairsDist{-1};
+    float lowObstacleDist{-1};
+    bool semanticUsed{false};
     int points{0};
     double ms{0};
 };
@@ -47,8 +64,9 @@ struct DepthIntrinsics {
 class SafetyLayer {
 public:
     // [depth] Z16, [units] metres per unit. [tSec] frame time.
+    // [sem] optional scene segmentation (nullptr = geometry only).
     SafetyResult process(const uint16_t* depth, const DepthIntrinsics& in,
-                         float units, double tSec);
+                         float units, double tSec, const SemanticInput* sem = nullptr);
 
     // Gravity "down" direction in the depth camera frame (unit vector).
     // Optional: improves the floor fit when an IMU is available.
@@ -79,14 +97,20 @@ public:
     // pitch rotates the plane but keeps the height, while a wrong fit that
     // mixes two levels changes it.
     float heightTolerance{0.05f};
+    // Semantics: stairs ahead raise CAUTION within this range; objects
+    // labelled as obstacles lower than bodyMinH count from lowObstacleMinH.
+    float stairsCautionDist{3.0f};
+    float stairsMinShare{0.30f};   // of the corridor points in a 10 cm bin
+    float lowObstacleMinH{0.04f};
+    int minWalkableForFit{150};
     double holdSec{0.5};
     double floorMemorySec{1.0};
 
 private:
-    struct P { float x, y, z; int u, v; };
+    struct P { float x, y, z; int u, v; uint8_t role; };
     struct Plane { float nx, ny, nz, d; bool valid{false}; };  // n·p + d = 0, n = up
 
-    bool fitFloor(const std::vector<P>& pts, Plane& out);
+    bool fitFloor(const std::vector<P>& pts, Plane& out, bool walkableOnly);
     float minPointsAt(float along) const;
 
     std::vector<P> pts_;

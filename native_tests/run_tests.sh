@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 SRC=../android/app/src/main/cpp
 OUT=${TMPDIR:-/tmp}/hsv2_native_tests
 mkdir -p "$OUT"
-for t in test_safety test_walk test_walkstep; do
+for t in test_safety test_walk test_walkstep test_semantic; do
   g++ -std=c++17 -O2 -Wall -I"$SRC" "$t.cpp" "$SRC/safety.cpp" -o "$OUT/$t"
   echo "== $t"; "$OUT/$t"
 done

@@ -69,7 +69,7 @@ float SafetyLayer::minPointsAt(float along) const {
     return std::max(3.0f, 24.0f / (a * a) * (16.0f / (sampleStep * sampleStep)));
 }
 
-bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out) {
+bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out, bool walkableOnly) {
     // Prior "up": previous floor if recent, else -gravity, else camera -y.
     float up[3];
     float tolDeg = maxFloorTiltDeg;
@@ -89,7 +89,10 @@ bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out) {
     std::vector<const P*> cand;
     cand.reserve(pts.size());
     for (const P& p : pts) {
-        if (p.z >= 0.4f && p.z <= 4.0f) cand.push_back(&p);
+        if (p.z < 0.4f || p.z > 4.0f) continue;
+        // With segmentation, fit only to pixels labelled floor / ground.
+        if (walkableOnly && p.role != kSemWalkable) continue;
+        cand.push_back(&p);
     }
     if (cand.size() < 50) return false;
 
@@ -166,9 +169,12 @@ bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out) {
 }
 
 SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& in,
-                                  float units, double tSec) {
+                                  float units, double tSec, const SemanticInput* sem) {
     const auto t0 = std::chrono::steady_clock::now();
     SafetyResult r;
+    const bool useSem = sem && sem->roles && sem->gridW > 0 && sem->gridH > 0 && sem->colorW > 0;
+    r.semanticUsed = useSem;
+    int walkable = 0;
 
     // 1. Sample + back-project.
     pts_.clear();
@@ -178,14 +184,35 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
             if (!row[u]) continue;
             const float z = row[u] * units;
             if (z < minRange || z > maxRange) continue;
-            pts_.push_back({(u - in.ppx) * z / in.fx, (v - in.ppy) * z / in.fy, z, u, v});
+            const float x = (u - in.ppx) * z / in.fx, y = (v - in.ppy) * z / in.fy;
+            uint8_t role = kSemOther;
+            if (useSem) {
+                // Depth point -> colour camera -> segmentation cell.
+                const float* R = sem->rot;
+                const float cx = R[0]*x + R[3]*y + R[6]*z + sem->trans[0];
+                const float cy = R[1]*x + R[4]*y + R[7]*z + sem->trans[1];
+                const float cz = R[2]*x + R[5]*y + R[8]*z + sem->trans[2];
+                if (cz > 0.05f) {
+                    const float cu = sem->fx * cx / cz + sem->ppx;
+                    const float cv = sem->fy * cy / cz + sem->ppy;
+                    if (cu >= 0 && cv >= 0 && cu < sem->colorW && cv < sem->colorH) {
+                        const int gx = static_cast<int>(cu * sem->gridW / sem->colorW);
+                        const int gy = static_cast<int>(cv * sem->gridH / sem->colorH);
+                        role = sem->roles[gy * sem->gridW + gx];
+                    }
+                }
+                if (role == kSemWalkable) ++walkable;
+            }
+            pts_.push_back({x, y, z, u, v, role});
         }
     }
     r.points = static_cast<int>(pts_.size());
 
     // 2. Floor plane (with short memory, smoothed).
     Plane fit;
-    if (fitFloor(pts_, fit)) {
+    // Walkable-only fit when the segmentation sees enough floor, else all points.
+    const bool walkableOnly = useSem && walkable >= minWalkableForFit;
+    if (fitFloor(pts_, fit, walkableOnly) || (walkableOnly && fitFloor(pts_, fit, false))) {
         if (floor_.valid) {
             // Light smoothing only: heavy smoothing lags head nods (~2 deg)
             // and makes the far floor look like a drop.
@@ -255,6 +282,8 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
         // Nearest point in each bin per category (exact distance reporting).
         std::vector<float> bodyMin(bins, 1e9f), headMin(bins, 1e9f), belowMin(bins, 1e9f);
         std::vector<float> floorMax(bins, -1.0f);   // farthest floor point per bin
+        std::vector<int> stairs(bins, 0), low(bins, 0);
+        std::vector<float> stairsMin(bins, 1e9f), lowMin(bins, 1e9f);
 
         for (const P& p : pts_) {
             const float pv[3] = {p.x, p.y, p.z};
@@ -266,6 +295,10 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
             const int b = static_cast<int>((along - corridorNear) / kBin);
             any[b]++;
             if (h > bodyMinH && h <= bodyMaxH) { body[b]++; bodyMin[b] = std::min(bodyMin[b], along); }
+            if (p.role == kSemStairs && h < 1.0f) { stairs[b]++; stairsMin[b] = std::min(stairsMin[b], along); }
+            if (p.role == kSemObstacle && h > lowObstacleMinH && h <= bodyMinH) {
+                low[b]++; lowMin[b] = std::min(lowMin[b], along);
+            }
             else if (h > bodyMaxH && h <= headMaxH) { head[b]++; headMin[b] = std::min(headMin[b], along); }
             if (std::fabs(lat) < 0.30f) {
                 if (std::fabs(h) < 0.05f) { floorC[b]++; floorMax[b] = std::max(floorMax[b], along); }
@@ -278,6 +311,11 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
             const float a = corridorNear + b * kBin;
             if (r.obstacleDist < 0 && body[b] >= minPointsAt(a)) r.obstacleDist = bodyMin[b];
             if (r.headDist < 0 && head[b] >= minPointsAt(a)) r.headDist = headMin[b];
+            // Stairs need a solid patch (not scattered mislabels): enough
+            // points and a large share of the bin.
+            if (r.stairsDist < 0 && stairs[b] >= 2 * minPointsAt(a) &&
+                stairs[b] >= stairsMinShare * any[b]) r.stairsDist = stairsMin[b];
+            if (r.lowObstacleDist < 0 && low[b] >= minPointsAt(a)) r.lowObstacleDist = lowMin[b];
         }
 
         // 6. Drop-off: floor falling away along the centre strip.
@@ -321,7 +359,16 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
         };
         consider(level(r.obstacleDist, stopDist, cautionDist), SafetyReason::Obstacle, r.obstacleDist);
         consider(level(r.headDist, stopDist, cautionDist), SafetyReason::HeadHeight, r.headDist);
-        consider(level(r.dropDist, dropStopDist, dropCautionDist), SafetyReason::DropOff, r.dropDist);
+        // A drop with stairs labelled near it is reported as stairs.
+        const bool dropIsStairs = r.dropDist >= 0 && r.stairsDist >= 0 &&
+                                  std::fabs(r.stairsDist - r.dropDist) < 0.6f;
+        consider(level(r.dropDist, dropStopDist, dropCautionDist),
+                 dropIsStairs ? SafetyReason::Stairs : SafetyReason::DropOff, r.dropDist);
+        // Stairs seen by the segmentation (up or down): CAUTION in range.
+        if (r.stairsDist >= 0 && r.stairsDist < stairsCautionDist)
+            consider(1, SafetyReason::Stairs, r.stairsDist);
+        // Low objects (4-10 cm) the height bands miss, labelled as obstacles.
+        consider(level(r.lowObstacleDist, stopDist, cautionDist), SafetyReason::Obstacle, r.lowObstacleDist);
         if (r.unknownDist >= 0) consider(1, SafetyReason::UnknownFloor, r.unknownDist);
     }
 

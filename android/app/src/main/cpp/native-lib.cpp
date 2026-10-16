@@ -34,7 +34,7 @@ ObjectTracker g_tracker;
 SafetyLayer g_safety;
 // Whole-scene semantic segmentation on its own worker thread (~10-15 Hz).
 SemanticSegmenter g_semseg;
-// 0 = camera only, 1 = camera + segmentation overlay.
+// 0 = camera only, 1 = camera + segmentation overlay, 2 = segmentation only.
 std::atomic<int> g_viewMode(1);
 rs2::device g_rsDevice;  // the pipeline's active device (shared with the IMU)
 // IMU start is deferred until the colour/depth stream is flowing; see the
@@ -305,6 +305,8 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
             int frame_count = 0;
             int consecutive_timeouts = 0;
             SegMap seg_map;
+            std::vector<uint8_t> seg_roles;
+            uint64_t seg_roles_seq = 0;
 
             // Depth auto-recovery state (see kDepthDeadFraction).
             auto depth_dead_since = std::chrono::steady_clock::time_point{};
@@ -525,13 +527,42 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                         
                         // --- LAYER 1 REACTIVE SAFETY (live depth only) ---
                         SafetyResult safety;
+                        // Scene segmentation roles for the safety layer (fresh maps only).
+                        SemanticInput sem_in;
+                        bool sem_ok = false;
+                        if (calib_ready && g_semseg.latest(seg_map) &&
+                            frame_timestamp_ms / 1000.0 - seg_map.frameTimeSec < 0.3) {
+                            if (seg_roles_seq != seg_map.seq) {
+                                seg_roles.resize(seg_map.cls.size());
+                                for (size_t i = 0; i < seg_roles.size(); ++i) {
+                                    switch (seg_map.cls[i]) {
+                                        case kNavFloor: case kNavRoad: case kNavSidewalk: case kNavTerrain:
+                                            seg_roles[i] = kSemWalkable; break;
+                                        case kNavStairs: seg_roles[i] = kSemStairs; break;
+                                        case kNavObstacle: case kNavVehicle: seg_roles[i] = kSemObstacle; break;
+                                        default: seg_roles[i] = kSemOther;
+                                    }
+                                }
+                                seg_roles_seq = seg_map.seq;
+                            }
+                            sem_in.roles = seg_roles.data();
+                            sem_in.gridW = seg_map.width;
+                            sem_in.gridH = seg_map.height;
+                            for (int i = 0; i < 9; ++i) sem_in.rot[i] = depth_to_color.rotation[i];
+                            for (int i = 0; i < 3; ++i) sem_in.trans[i] = depth_to_color.translation[i];
+                            sem_in.fx = color_intrin.fx; sem_in.fy = color_intrin.fy;
+                            sem_in.ppx = color_intrin.ppx; sem_in.ppy = color_intrin.ppy;
+                            sem_in.colorW = color_intrin.width; sem_in.colorH = color_intrin.height;
+                            sem_ok = true;
+                        }
                         if (depth_frame && calib_ready) {
                             const DepthIntrinsics din{depth_intrin.fx, depth_intrin.fy,
                                                       depth_intrin.ppx, depth_intrin.ppy,
                                                       depth_intrin.width, depth_intrin.height};
                             safety = g_safety.process(
                                 static_cast<const uint16_t*>(depth_frame.get_data()), din,
-                                depth_frame.get_units(), frame_timestamp_ms / 1000.0);
+                                depth_frame.get_units(), frame_timestamp_ms / 1000.0,
+                                sem_ok ? &sem_in : nullptr);
                         }
 
                         // --- INFERENCE (NPU) ---
@@ -642,8 +673,9 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                     }
 
                                     // Segmentation overlay (newest map; it lags by up to ~100 ms).
-                                    if (g_viewMode == 1 && g_semseg.latest(seg_map)) {
-                                        drawSegmentation(out, width, height, buffer.stride, seg_map);
+                                    if (g_viewMode != 0 && g_semseg.latest(seg_map)) {
+                                        drawSegmentation(out, width, height, buffer.stride, seg_map,
+                                                         g_viewMode == 2 ? 256 : 115);
                                     }
                                     drawDetections(out, width, height, buffer.stride, detections);
                                 }
@@ -702,7 +734,8 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                     : safety.reason == SafetyReason::HeadHeight ? "head"
                                     : safety.reason == SafetyReason::DropOff ? "dropoff"
                                     : safety.reason == SafetyReason::UnknownFloor ? "unknown"
-                                    : safety.reason == SafetyReason::NoFloor ? "nofloor" : "none";
+                                    : safety.reason == SafetyReason::NoFloor ? "nofloor"
+                                    : safety.reason == SafetyReason::Stairs ? "stairs" : "none";
                                 float alert_dist = safety.distance;
                                 float alert_ttc = -1.0f;
                                 const int moving = static_cast<int>(g_tracker.alert());
@@ -755,7 +788,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          "\"battery\": 100.0, \"centerDistance\": %.2f, \"droppedFrames\": %d, "
                                          "\"inferenceMs\": %.1f, \"imu\": %s, "
                                          "\"alert\": \"%s\", \"alertReason\": \"%s\", \"alertDist\": %.2f, \"alertTtc\": %.2f, "
-                                         "\"safety\": {\"floor\": %s, \"camHeight\": %.2f, \"pitch\": %.1f, \"ms\": %.2f}, "
+                                         "\"safety\": {\"floor\": %s, \"camHeight\": %.2f, \"pitch\": %.1f, \"ms\": %.2f, \"semantic\": %s}, "
                                          "\"semseg\": %s, \"viewMode\": %d, \"detections\": %s}",
                                          current_fps.load(), latency, center_distance, total_dropped_frames,
                                          inference_ms, imu_json,
@@ -763,7 +796,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          alert_reason, alert_dist, alert_ttc,
                                          safety.floorFound ? "true" : "false", safety.cameraHeight,
                                          safety.cameraPitchDeg, safety.ms,
-                                         seg_json, g_viewMode.load(), detections_json.c_str());
+                                         safety.semanticUsed ? "true" : "false", seg_json, g_viewMode.load(), detections_json.c_str());
                                 
                                 ANativeWindow_unlockAndPost(nativeWindow);
                                 double render_ms = std::chrono::duration<double, std::milli>(

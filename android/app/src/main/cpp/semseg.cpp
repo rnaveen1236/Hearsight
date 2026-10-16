@@ -65,9 +65,9 @@ const AdeMap kAde;
 const char* navClassName(int c) { return c >= 0 && c < kNavCount ? kNames[c] : "?"; }
 const uint8_t* navClassColor(int c) { return kColors[c >= 0 && c < kNavCount ? c : 0]; }
 
-void drawSegmentation(uint8_t* rgba, int width, int height, int stride, const SegMap& map) {
+void drawSegmentation(uint8_t* rgba, int width, int height, int stride, const SegMap& map,
+                      int alpha) {
     if (map.width <= 0 || map.height <= 0) return;
-    constexpr int kAlpha = 115;  // of 256 (~45 %)
     std::vector<int> colIdx(width);
     for (int x = 0; x < width; ++x) colIdx[x] = (x * map.width) / width;
     for (int y = 0; y < height; ++y) {
@@ -75,9 +75,9 @@ void drawSegmentation(uint8_t* rgba, int width, int height, int stride, const Se
         uint8_t* p = rgba + static_cast<size_t>(y) * stride * 4;
         for (int x = 0; x < width; ++x, p += 4) {
             const uint8_t* c = kColors[row[colIdx[x]]];
-            p[0] = static_cast<uint8_t>((p[0] * (256 - kAlpha) + c[0] * kAlpha) >> 8);
-            p[1] = static_cast<uint8_t>((p[1] * (256 - kAlpha) + c[1] * kAlpha) >> 8);
-            p[2] = static_cast<uint8_t>((p[2] * (256 - kAlpha) + c[2] * kAlpha) >> 8);
+            p[0] = static_cast<uint8_t>((p[0] * (256 - alpha) + c[0] * alpha) >> 8);
+            p[1] = static_cast<uint8_t>((p[1] * (256 - alpha) + c[1] * alpha) >> 8);
+            p[2] = static_cast<uint8_t>((p[2] * (256 - alpha) + c[2] * alpha) >> 8);
         }
     }
 }

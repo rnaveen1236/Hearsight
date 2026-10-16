@@ -50,7 +50,8 @@ struct SegMap {
 };
 
 // Blends the class colours over an RGBA8 image (any size; the map is scaled).
-void drawSegmentation(uint8_t* rgba, int width, int height, int stride, const SegMap& map);
+void drawSegmentation(uint8_t* rgba, int width, int height, int stride, const SegMap& map,
+                      int alpha = 115 /* of 256 */);
 
 class SemanticSegmenter {
 public:
