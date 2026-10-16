@@ -462,16 +462,16 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
             memoReason_ = (r.headDist >= 0 && r.headDist <= nearest) ? SafetyReason::HeadHeight
                                                                      : SafetyReason::Obstacle;
         } else if (memoDist_ > 0 && tSec - memoTime_ < outOfViewHoldSec) {
-            const float a = memoDist_;
-            const float q[3] = {-floor_.d * n[0] + a * f[0], -floor_.d * n[1] + a * f[1],
-                                -floor_.d * n[2] + a * f[2]};
-            bool inView = false;
-            if (q[2] > 0.1f) {
-                const float u = in.fx * q[0] / q[2] + in.ppx;
-                const float v = in.fy * q[1] / q[2] + in.ppy;
-                inView = u >= 0 && u < in.width && v >= 0 && v < in.height;
+            // Forget it only when that stretch of floor is actually seen
+            // again and empty: enough floor points, no body points. Being
+            // inside the image is not enough (the bottom edge has patchy depth).
+            const int b = static_cast<int>((memoDist_ - corridorNear) / kBin);
+            bool seenClear = false;
+            if (b >= 0 && b < bins) {
+                const float need = minPointsAt(memoDist_);
+                seenClear = floorC[b] >= need && body[b] < need * 0.5f;
             }
-            if (inView) memoDist_ = -1;   // visible again and clear: forget it
+            if (seenClear) memoDist_ = -1;
             else consider(memoLevel_, memoReason_, memoDist_);
         }
         // A drop with stairs labelled near it is reported as stairs.
