@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
@@ -128,10 +127,12 @@ class _HomeScreenState extends State<HomeScreen> {
                                         right: 0,
                                         child: Center(child: _motionAlertBanner(state.telemetry)),
                                       ),
-                                    // IMU panel (bottom-right of the RGB view, clear of labels)
+                                    // IMU panel: compact, top-left under the alert banner
+                                    // (the top of the view is ceiling; the bottom shows
+                                    // the floor, steps and low obstacles).
                                     Positioned(
-                                      bottom: 8,
-                                      right: 8,
+                                      top: 64,
+                                      left: 8,
                                       // Tap to zero (level the mount offset).
                                       child: GestureDetector(
                                         onTap: () => context.read<AppState>().zeroImu(),
@@ -292,32 +293,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Live D455 IMU readout: orientation + sample rates.
   Widget _imuPanel(ImuData imu) {
-    const style = TextStyle(color: Colors.white, fontSize: 12, fontFeatures: [FontFeature.tabularFigures()]);
+    const style = TextStyle(color: Colors.white, fontSize: 11, fontFeatures: [FontFeature.tabularFigures()]);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: imu.running ? Colors.cyanAccent.withValues(alpha: 0.6) : Colors.white24),
       ),
       child: imu.running
-          ? Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('IMU${imu.source.isNotEmpty ? ' (${imu.source})' : ''}  pitch ${imu.pitchDeg.toStringAsFixed(1)}°  roll ${imu.rollDeg.toStringAsFixed(1)}°',
-                    style: style.copyWith(color: Colors.cyanAccent, fontWeight: FontWeight.bold)),
-                Text('gyro ${imu.gyroHz.toStringAsFixed(0)} Hz  accel ${imu.accelHz.toStringAsFixed(0)} Hz', style: style),
-                Text('|g| ${_norm(imu.accel).toStringAsFixed(2)} m/s²  |ω| ${_norm(imu.gyro).toStringAsFixed(2)} rad/s', style: style),
-                Text('tap to zero', style: style.copyWith(color: Colors.white54, fontSize: 10)),
-              ],
-            )
+          // One line; tap to zero.
+          ? Text('IMU${imu.source.isNotEmpty ? ' ${imu.source}' : ''}  P ${imu.pitchDeg.toStringAsFixed(0)}°  R ${imu.rollDeg.toStringAsFixed(0)}°',
+              style: style.copyWith(color: Colors.cyanAccent, fontSize: 11))
           : const Text('IMU off', style: style),
     );
   }
 
-  static double _norm(List<double> v) =>
-      v.length < 3 ? 0.0 : math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+
 
   static const _labelStyle = TextStyle(
     color: Colors.black,
