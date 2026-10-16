@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <mutex>
 #include <vector>
 #include "qnn_runtime.h"
@@ -22,6 +23,7 @@
 #include "safety.h"
 #include "semseg.h"
 #include "vo.h"
+#include "recorder.h"
 
 QnnRuntime g_qnnRuntime;
 YoloDetector g_detector;
@@ -37,6 +39,12 @@ SafetyLayer g_safety;
 SemanticSegmenter g_semseg;
 // Visual odometry (Phase 3): the user's own motion; stream thread only.
 VoThread g_vo;
+// Walk recorder (REC button): started by the stream thread on the next frame
+// once the camera calibration is known (g_recDir set by JNI).
+Recorder g_recorder;
+std::mutex g_recMutex;
+std::string g_recDir;          // non-empty = start requested
+std::atomic<bool> g_recStopReq(false);
 bool g_voEnabled = true;   // adb shell setprop debug.hsv2.vo 0 disables
 // 0 = camera only, 1 = camera + segmentation overlay, 2 = segmentation only.
 std::atomic<int> g_viewMode(1);
@@ -661,6 +669,40 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
 
                             // --- VISUAL ODOMETRY (own thread; newest result, <= ~2 frames old) ---
                             if (g_voEnabled && calib_ready && depth_frame) {
+                                // REC: start / stop requests from JNI.
+                                {
+                                    std::lock_guard<std::mutex> rl(g_recMutex);
+                                    if (!g_recDir.empty() && g_vo.running()) {
+                                        RecHeader rh{};
+                                        rh.grayW = color_intrin.width / 2; rh.grayH = color_intrin.height / 2;
+                                        rh.depW = depth_intrin.width / 2; rh.depH = depth_intrin.height / 2;
+                                        rh.depthUnits = depth_frame.get_units();
+                                        rh.cam = {color_intrin.fx, color_intrin.fy, color_intrin.ppx, color_intrin.ppy,
+                                                  color_intrin.width, color_intrin.height};
+                                        rh.reg = {depth_intrin.fx, depth_intrin.fy, depth_intrin.ppx, depth_intrin.ppy,
+                                                  depth_intrin.width, depth_intrin.height,
+                                                  color_intrin.fx, color_intrin.fy, color_intrin.ppx, color_intrin.ppy,
+                                                  color_intrin.width, color_intrin.height, {}, {}};
+                                        for (int i = 0; i < 9; ++i) rh.reg.rot[i] = depth_to_color.rotation[i];
+                                        for (int i = 0; i < 3; ++i) rh.reg.trans[i] = depth_to_color.translation[i];
+                                        char name[64];
+                                        const time_t now = time(nullptr);
+                                        strftime(name, sizeof(name), "/walk_%Y%m%d_%H%M%S.hsr", localtime(&now));
+                                        const std::string path = g_recDir + name;
+                                        if (g_recorder.start(path, rh)) {
+                                            g_vo.setRecorder(&g_recorder);
+                                            LOGI("REC started: %s", path.c_str());
+                                        } else {
+                                            LOGE("REC: cannot open %s", path.c_str());
+                                        }
+                                        g_recDir.clear();
+                                    }
+                                }
+                                if (g_recStopReq.exchange(false) && g_recorder.active()) {
+                                    g_recorder.stop();
+                                    LOGI("REC stopped: %d frames, %d dropped, %.0f MB -> %s", g_recorder.frames(),
+                                         g_recorder.dropped(), g_recorder.megabytes(), g_recorder.path().c_str());
+                                }
                                 if (!g_vo.running()) {
                                     DepthToColor dc{depth_intrin.fx, depth_intrin.fy, depth_intrin.ppx, depth_intrin.ppy,
                                                     depth_intrin.width, depth_intrin.height,
@@ -835,6 +877,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          "\"safety\": {\"floor\": %s, \"camHeight\": %.2f, \"pitch\": %.1f, \"ms\": %.2f, \"semantic\": %s}, "
                                          "\"semseg\": %s, \"viewMode\": %d, "
                                          "\"vo\": {\"ok\": %s, \"speed\": %.2f, \"turn\": %.1f, \"inliers\": %d, \"ms\": %.1f}, "
+                                         "\"rec\": {\"on\": %s, \"frames\": %d, \"mb\": %.0f, \"dropped\": %d}, "
                                          "\"detections\": %s}",
                                          current_fps.load(), latency, center_distance, total_dropped_frames,
                                          inference_ms, imu_json,
@@ -844,7 +887,9 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          safety.cameraPitchDeg, safety.ms,
                                          safety.semanticUsed ? "true" : "false", seg_json, g_viewMode.load(),
                                          vo_res.ok ? "true" : "false", vo_res.speed, vo_res.angRate * 57.2958f,
-                                         vo_res.inliers, vo_res.ms, detections_json.c_str());
+                                         vo_res.inliers, vo_res.ms,
+                                         g_recorder.active() ? "true" : "false", g_recorder.frames(),
+                                         g_recorder.megabytes(), g_recorder.dropped(), detections_json.c_str());
                                 
                                 ANativeWindow_unlockAndPost(nativeWindow);
                                 double render_ms = std::chrono::duration<double, std::milli>(
@@ -927,6 +972,11 @@ Java_com_hsv2_hsv2_1lite_MainActivity_stopPipeline(
     g_imuPending = false;
     g_imu.stop();
     g_vo.stop();
+    g_vo.setRecorder(nullptr);
+    if (g_recorder.active()) {
+        g_recorder.stop();
+        LOGI("REC stopped with the pipeline: %d frames -> %s", g_recorder.frames(), g_recorder.path().c_str());
+    }
     
     if (rs_pipe) {
         try {
@@ -948,6 +998,21 @@ Java_com_hsv2_hsv2_1lite_MainActivity_initSemSeg(
     env->ReleaseStringUTFChars(contextBinaryPath, ctx);
     env->ReleaseStringUTFChars(nativeLibDir, lib);
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_hsv2_hsv2_1lite_MainActivity_startRecording(JNIEnv* env, jobject /* this */, jstring dir) {
+    const char* d = env->GetStringUTFChars(dir, nullptr);
+    {
+        std::lock_guard<std::mutex> rl(g_recMutex);
+        g_recDir = d;
+    }
+    env->ReleaseStringUTFChars(dir, d);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_hsv2_hsv2_1lite_MainActivity_stopRecording(JNIEnv* /* env */, jobject /* this */) {
+    g_recStopReq = true;
 }
 
 extern "C" JNIEXPORT void JNICALL

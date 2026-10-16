@@ -209,7 +209,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                       const SizedBox(height: 8),
-                      Text('FPS ${state.telemetry.fps.toStringAsFixed(0)} · ${state.telemetry.p95LatencyMs.toStringAsFixed(0)} ms', style: const TextStyle(color: Colors.white70)),
+                      Text('FPS ${state.telemetry.fps.toStringAsFixed(0)} · ${state.telemetry.p95LatencyMs.toStringAsFixed(0)} ms${state.recording ? ' · REC' : ''}',
+                          style: TextStyle(color: state.recording ? Colors.redAccent : Colors.white70)),
                       if (state.streamError != null)
                         Padding(
                           padding: const EdgeInsets.only(top: 4),
@@ -224,6 +225,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                  IconButton(
+                    tooltip: state.recording ? 'Stop recording' : 'Record walk',
+                    onPressed: state.isPipelineRunning ? () => context.read<AppState>().toggleRecording() : null,
+                    icon: Icon(state.recording ? Icons.stop_circle : Icons.fiber_manual_record,
+                        color: state.recording ? Colors.redAccent : Colors.white70),
+                  ),
                   OutlinedButton.icon(
                     onPressed: () => context.read<AppState>().cycleViewMode(),
                     icon: const Icon(Icons.layers),

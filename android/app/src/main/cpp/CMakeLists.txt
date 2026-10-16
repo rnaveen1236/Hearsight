@@ -65,6 +65,7 @@ add_library(
         gravity_calib.cpp
         rigid.cpp
         vo.cpp
+        recorder.cpp
 )
 
 # ============================================================

@@ -157,6 +157,13 @@ class MainActivity : FlutterActivity() {
     @Keep
     external fun setViewMode(mode: Int)
 
+    // Walk recorder: files go to /sdcard/Android/data/<pkg>/files/rec/.
+    @Keep
+    external fun startRecording(dir: String)
+
+    @Keep
+    external fun stopRecording()
+
     @Keep
     private external fun initQnn(
         contextBinaryPath: String,
@@ -367,6 +374,23 @@ class MainActivity : FlutterActivity() {
                         )
                     }
 
+                    result.success(null)
+                }
+
+                "startRecording" -> {
+                    try {
+                        val dir = File(getExternalFilesDir(null), "rec")
+                        dir.mkdirs()
+                        startRecording(dir.absolutePath)
+                        result.success(dir.absolutePath)
+                    } catch (e: Exception) {
+                        Log.e(LOG_TAG, "startRecording failed", e)
+                        result.success(null)
+                    }
+                }
+
+                "stopRecording" -> {
+                    try { stopRecording() } catch (e: Exception) { Log.e(LOG_TAG, "stopRecording failed", e) }
                     result.success(null)
                 }
 

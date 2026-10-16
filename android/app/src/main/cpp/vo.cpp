@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 
+#include "recorder.h"
 #include "rigid.h"
 
 namespace {
@@ -79,24 +80,28 @@ void VisualOdometry::reset() {
     angRate_ = 0;
 }
 
-void VisualOdometry::buildPyramid(const uint8_t* rgba, std::vector<Level>& pyr) const {
-    pyr.resize(kLevels);
-    // Level 0: half resolution grey (2x2 average of luma), values 0..1.
-    const int W = cam_.width, H = cam_.height;
-    Level& l0 = pyr[0];
-    l0.w = W / 2;
-    l0.h = H / 2;
-    l0.img.resize(static_cast<size_t>(l0.w) * l0.h);
-    for (int y = 0; y < l0.h; ++y) {
+void rgbaToHalfGray(const uint8_t* rgba, int W, int H, std::vector<uint8_t>& out) {
+    const int w = W / 2, h = H / 2;
+    out.resize(static_cast<size_t>(w) * h);
+    for (int y = 0; y < h; ++y) {
         const uint8_t* a = rgba + static_cast<size_t>(2 * y) * W * 4;
         const uint8_t* b = a + static_cast<size_t>(W) * 4;
-        for (int x = 0; x < l0.w; ++x) {
+        for (int x = 0; x < w; ++x) {
             int s = 0;
             for (const uint8_t* p : {a + 8 * x, a + 8 * x + 4, b + 8 * x, b + 8 * x + 4})
                 s += 77 * p[0] + 150 * p[1] + 29 * p[2];
-            l0.img[y * l0.w + x] = s * (1.0f / (4 * 256 * 255));
+            out[static_cast<size_t>(y) * w + x] = static_cast<uint8_t>(s / (4 * 256));
         }
     }
+}
+
+void VisualOdometry::buildPyramid(const uint8_t* gray, std::vector<Level>& pyr) const {
+    pyr.resize(kLevels);
+    Level& l0 = pyr[0];
+    l0.w = cam_.width / 2;
+    l0.h = cam_.height / 2;
+    l0.img.resize(static_cast<size_t>(l0.w) * l0.h);
+    for (size_t i = 0; i < l0.img.size(); ++i) l0.img[i] = gray[i] * (1.0f / 255);
     for (int l = 1; l < kLevels; ++l) {
         const Level& s = pyr[l - 1];
         Level& d = pyr[l];
@@ -206,9 +211,15 @@ bool VisualOdometry::backProject(float hx, float hy, VoDepthFn depth, void* ctx,
 }
 
 VoResult VisualOdometry::process(const uint8_t* rgba, double tSec, VoDepthFn depth, void* ctx) {
+    std::vector<uint8_t> gray;
+    rgbaToHalfGray(rgba, cam_.width, cam_.height, gray);
+    return processGray(gray.data(), tSec, depth, ctx);
+}
+
+VoResult VisualOdometry::processGray(const uint8_t* gray, double tSec, VoDepthFn depth, void* ctx) {
     const auto t0 = std::chrono::steady_clock::now();
     VoResult r;
-    buildPyramid(rgba, cur_);
+    buildPyramid(gray, cur_);
 
     if (havePrev_) {
         // Track every point forward, then back, and keep consistent ones.
@@ -385,6 +396,7 @@ void VoThread::loop() {
     std::vector<uint8_t> rgba;
     std::vector<uint16_t> depth;
     std::vector<float> half;
+    std::vector<uint8_t> gray;
     for (;;) {
         double t;
         float units;
@@ -402,13 +414,15 @@ void VoThread::loop() {
         }
         const auto t0 = std::chrono::steady_clock::now();
         registerDepthHalf(depth.data(), units, reg_, 2, half);
+        rgbaToHalfGray(rgba.data(), reg_.cw, reg_.ch, gray);
         struct Ctx { const std::vector<float>* m; int w, h; } ctx{&half, reg_.cw, reg_.ch};
-        VoResult r = vo_.process(rgba.data(), t,
+        VoResult r = vo_.processGray(gray.data(), t,
                                  [](void* c, float u, float v) {
                                      const Ctx* x = static_cast<const Ctx*>(c);
                                      return depthHalfAt(*x->m, x->w, x->h, u, v);
                                  }, &ctx);
         r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (rec_ && rec_->active()) rec_->push(t, gray.data(), depth.data(), r, vo_.poseT());
         std::lock_guard<std::mutex> lk(m_);
         res_ = r;
         for (int i = 0; i < 9; ++i) R_[i] = vo_.poseR()[i];

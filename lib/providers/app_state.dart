@@ -118,6 +118,20 @@ class AppState extends ChangeNotifier {
   int viewMode = 1;
   static const viewModeLabels = ['CAM', 'MIX', 'SEG'];
 
+  /// Walk recorder (REC button).
+  bool recording = false;
+
+  Future<void> toggleRecording() async {
+    recording = !recording;
+    notifyListeners();
+    if (kIsWeb) return;
+    try {
+      await _commandChannel.invokeMethod(recording ? 'startRecording' : 'stopRecording');
+    } on PlatformException catch (e) {
+      debugPrint("Recording toggle failed: '${e.message}'.");
+    }
+  }
+
   Future<void> cycleViewMode() async {
     viewMode = (viewMode + 1) % 3;
     notifyListeners();

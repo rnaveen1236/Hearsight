@@ -53,6 +53,9 @@ struct DepthToColor {
 };
 void registerDepthHalf(const uint16_t* depth, float units, const DepthToColor& c, int step,
                        std::vector<float>& out);
+// Half-resolution grey (2x2 average of luma) of an RGBA8 image.
+void rgbaToHalfGray(const uint8_t* rgba, int width, int height, std::vector<uint8_t>& out);
+
 // Lookup with a 3x3 nearest-valid search; (u, v) full-res colour pixels.
 float depthHalfAt(const std::vector<float>& map, int cw, int ch, float u, float v);
 
@@ -61,6 +64,8 @@ public:
     void setCamera(const VoCamera& cam);
     // [rgba]: full-resolution RGBA8, row stride width*4.
     VoResult process(const uint8_t* rgba, double tSec, VoDepthFn depth, void* ctx);
+    // [gray]: half-resolution grey (see rgbaToHalfGray); what process() uses.
+    VoResult processGray(const uint8_t* gray, double tSec, VoDepthFn depth, void* ctx);
     void reset();
 
     // Current camera pose in the world frame: p_world = R * p_cam + t.
@@ -80,7 +85,7 @@ private:
     struct Level { int w, h; std::vector<float> img; };
     struct Track { float x, y; float P[3]; bool hasP; };
 
-    void buildPyramid(const uint8_t* rgba, std::vector<Level>& pyr) const;
+    void buildPyramid(const uint8_t* gray, std::vector<Level>& pyr) const;
     bool trackPoint(const std::vector<Level>& from, const std::vector<Level>& to,
                     float x, float y, float& ox, float& oy) const;
     void detect(const std::vector<Level>& pyr);
@@ -101,8 +106,12 @@ private:
 // Runs VisualOdometry on its own thread (latest frame only), so the camera
 // loop is not slowed down. The loop submits each frame's colour + depth and
 // reads the newest result (at most a frame or two old).
+class Recorder;
+
 class VoThread {
 public:
+    // Optional: frames processed by the worker are also written here.
+    void setRecorder(Recorder* rec) { rec_ = rec; }
     ~VoThread() { stop(); }
     void start(const VoCamera& cam, const DepthToColor& reg);
     void stop();
@@ -115,6 +124,7 @@ public:
 
 private:
     void loop();
+    Recorder* rec_{nullptr};
     VisualOdometry vo_;
     DepthToColor reg_{};
     std::thread thread_;
