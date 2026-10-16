@@ -51,6 +51,16 @@ bool ObjectTracker::isMover(int cocoClass) {
            (cocoClass >= 14 && cocoClass <= 23);
 }
 
+void ObjectTracker::setEgo(bool valid, const float R[9], const float t[3], const float velCam[3]) {
+    ego_ = valid;
+    if (!valid) return;
+    for (int i = 0; i < 9; ++i) egoR_[i] = R[i];
+    for (int i = 0; i < 3; ++i) egoT_[i] = t[i];
+    // Camera velocity into world axes.
+    for (int i = 0; i < 3; ++i)
+        egoV_[i] = R[i * 3] * velCam[0] + R[i * 3 + 1] * velCam[1] + R[i * 3 + 2] * velCam[2];
+}
+
 void ObjectTracker::update(const std::vector<Detection>& dets, double tSec,
                            std::vector<TrackInfo>& info) {
     info.assign(dets.size(), TrackInfo{});
@@ -119,17 +129,33 @@ void ObjectTracker::update(const std::vector<Detection>& dets, double tSec,
         }
         tr.bx = det.x; tr.by = det.y; tr.bw = det.w; tr.bh = det.h;
 
+        // Frame of the filters follows ego availability; restart on a switch.
+        if (tr.world != ego_) {
+            tr.kx = Kf{}; tr.ky = Kf{}; tr.kz = Kf{};
+            tr.world = ego_;
+        }
         if (tr.kx.init) {
             tr.kx.predict(dt, kAccelNoise);
+            tr.ky.predict(dt, kAccelNoise);
             tr.kz.predict(dt, kAccelNoise);
         }
         if (det.distanceM > 0.0f) {
             const float Z = det.distanceM;
-            const float u = det.x + det.w * 0.5f;
+            const float u = det.x + det.w * 0.5f, v = det.y + det.h * 0.5f;
             const float X = (u - cx_) * Z / fx_;
+            const float Y = (v - cy_) * Z / fy_;
             const float r = kMeasNoiseBase * std::max(1.0f, Z * Z);
-            tr.kx.correct(X, r);
-            tr.kz.correct(Z, r);
+            if (tr.world) {
+                const float* R = egoR_;
+                float w[3];
+                for (int i = 0; i < 3; ++i) w[i] = R[i * 3] * X + R[i * 3 + 1] * Y + R[i * 3 + 2] * Z + egoT_[i];
+                tr.kx.correct(w[0], r);
+                tr.ky.correct(w[1], r);
+                tr.kz.correct(w[2], r);
+            } else {
+                tr.kx.correct(X, r);
+                tr.kz.correct(Z, r);
+            }
         }
         tr.hits++;
         tr.lastSeen = tr.lastUpdate = tSec;
@@ -160,19 +186,44 @@ void ObjectTracker::update(const std::vector<Detection>& dets, double tSec,
         ti.confirmed = tr.hits >= confirmHits;
         if (!tr.kx.init) continue;
 
-        ti.x = tr.kx.p; ti.z = tr.kz.p;
-        ti.vx = tr.kx.v; ti.vz = tr.kz.v;
-        ti.speed = std::sqrt(ti.vx * ti.vx + ti.vz * ti.vz);
-
-        // Closing speed toward the user (the camera at the origin).
-        const float range = std::sqrt(ti.x * ti.x + ti.z * ti.z);
-        const float closing = range > 0 ? -(ti.x * ti.vx + ti.z * ti.vz) / range : 0.0f;
-        // Only things that move on their own; a still chair "approaches" at
-        // the user's own walking speed (ego-motion is not removed yet).
-        if (ti.confirmed && closing > minClosingSpeed && isMover(tr.classId)) {
+        float closing, range, relVx;
+        bool movesItself;
+        if (tr.world) {
+            // World frame: object velocity is its own motion; relative to the
+            // user subtract the user's velocity. Report in camera axes.
+            const float* R = egoR_;
+            const float rw[3] = {tr.kx.p - egoT_[0], tr.ky.p - egoT_[1], tr.kz.p - egoT_[2]};
+            const float vo[3] = {tr.kx.v, tr.ky.v, tr.kz.v};
+            const float vr[3] = {vo[0] - egoV_[0], vo[1] - egoV_[1], vo[2] - egoV_[2]};
+            float rc[3], vc[3];   // R^T * (...)
+            for (int i = 0; i < 3; ++i) {
+                rc[i] = R[i] * rw[0] + R[3 + i] * rw[1] + R[6 + i] * rw[2];
+                vc[i] = R[i] * vo[0] + R[3 + i] * vo[1] + R[6 + i] * vo[2];
+            }
+            ti.x = rc[0]; ti.z = rc[2];
+            ti.vx = vc[0]; ti.vz = vc[2];
+            ti.speed = std::sqrt(vo[0] * vo[0] + vo[1] * vo[1] + vo[2] * vo[2]);
+            range = std::sqrt(rw[0] * rw[0] + rw[1] * rw[1] + rw[2] * rw[2]);
+            closing = range > 0 ? -(rw[0] * vr[0] + rw[1] * vr[1] + rw[2] * vr[2]) / range : 0.0f;
+            float vrc0 = R[0] * vr[0] + R[3] * vr[1] + R[6] * vr[2];
+            relVx = vrc0;
+            movesItself = ti.speed > minOwnSpeed;
+        } else {
+            ti.x = tr.kx.p; ti.z = tr.kz.p;
+            ti.vx = tr.kx.v; ti.vz = tr.kz.v;
+            ti.speed = std::sqrt(ti.vx * ti.vx + ti.vz * ti.vz);
+            // Closing speed toward the user (the camera at the origin).
+            range = std::sqrt(ti.x * ti.x + ti.z * ti.z);
+            closing = range > 0 ? -(ti.x * ti.vx + ti.z * ti.vz) / range : 0.0f;
+            relVx = ti.vx;
+            // Without ego-motion a still chair "approaches" at the user's own
+            // walking speed: only classes that move on their own count.
+            movesItself = isMover(tr.classId);
+        }
+        if (ti.confirmed && closing > minClosingSpeed && movesItself) {
             ti.approaching = true;
             ti.ttc = range / closing;
-            ti.lateralAtImpact = ti.x + ti.vx * ti.ttc;
+            ti.lateralAtImpact = ti.x + relVx * ti.ttc;
             const bool inPath = std::fabs(ti.lateralAtImpact) <= corridorHalfWidth ||
                                 std::fabs(ti.x) <= corridorHalfWidth;
             if (inPath) {

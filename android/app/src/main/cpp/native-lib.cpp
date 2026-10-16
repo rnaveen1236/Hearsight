@@ -21,6 +21,7 @@
 #include "tracker.h"
 #include "safety.h"
 #include "semseg.h"
+#include "vo.h"
 
 QnnRuntime g_qnnRuntime;
 YoloDetector g_detector;
@@ -34,6 +35,9 @@ ObjectTracker g_tracker;
 SafetyLayer g_safety;
 // Whole-scene semantic segmentation on its own worker thread (~10-15 Hz).
 SemanticSegmenter g_semseg;
+// Visual odometry (Phase 3): the user's own motion; stream thread only.
+VisualOdometry g_vo;
+bool g_voEnabled = true;   // adb shell setprop debug.hsv2.vo 0 disables
 // 0 = camera only, 1 = camera + segmentation overlay, 2 = segmentation only.
 std::atomic<int> g_viewMode(1);
 rs2::device g_rsDevice;  // the pipeline's active device (shared with the IMU)
@@ -248,6 +252,8 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
         }
         g_streamFps = fps;
         g_tracker.reset();
+        g_vo.reset();
+        g_voEnabled = debugPropEnabled("debug.hsv2.vo", true);
         g_safety.reset();
         g_imuEnabled = imuEnabled;
         LOGI("Streaming colour+depth 640x480 @ %d fps", fps);
@@ -305,6 +311,10 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
             int frame_count = 0;
             int consecutive_timeouts = 0;
             SegMap seg_map;
+            std::vector<float> depth_half;   // depth registered to colour, half res
+            VoResult vo_res;
+            int vo_frames = 0, vo_ok = 0;
+            double vo_ms_sum = 0, vo_speed_sum = 0;
             std::vector<uint8_t> seg_roles;
             uint64_t seg_roles_seq = 0;
 
@@ -548,6 +558,8 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             sem_in.colorW = color_intrin.width; sem_in.colorH = color_intrin.height;
                             sem_ok = true;
                         }
+                        // User's own motion (odometry of the previous frame, 33 ms old).
+                        g_safety.setEgoVelocity(vo_res.ok, vo_res.vel);
                         if (depth_frame && calib_ready) {
                             const DepthIntrinsics din{depth_intrin.fx, depth_intrin.fy,
                                                       depth_intrin.ppx, depth_intrin.ppy,
@@ -623,6 +635,12 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                      stats_wait_sum / stats_frames,
                                      stats_render_sum / stats_frames);
                                 LOGI("SemSeg: %.1f Hz | NPU %.1f ms", g_semseg.hz(), g_semseg.npuMs());
+                                if (vo_frames)
+                                    LOGI("VO: ok %d/%d | speed avg %.2f m/s | %.1f ms (incl. depth registration) | inliers %d/%d tracked %d",
+                                         vo_ok, vo_frames, vo_speed_sum / vo_frames, vo_ms_sum / vo_frames,
+                                         vo_res.inliers, vo_res.withDepth, vo_res.tracked);
+                                vo_frames = vo_ok = 0;
+                                vo_ms_sum = vo_speed_sum = 0;
                               }
                                 stats_wait_sum = stats_render_sum = 0.0;
                                 stats_start = stats_now;
@@ -640,10 +658,46 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             depth_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - t_depth).count();
 
+                            // --- VISUAL ODOMETRY (CPU, while segmentation runs on the NPU) ---
+                            vo_res = VoResult{};
+                            if (g_voEnabled && calib_ready && depth_frame) {
+                                static bool vo_cam_set = false;
+                                if (!vo_cam_set) {
+                                    g_vo.setCamera({color_intrin.fx, color_intrin.fy, color_intrin.ppx,
+                                                    color_intrin.ppy, color_intrin.width, color_intrin.height});
+                                    vo_cam_set = true;
+                                }
+                                DepthToColor dc{depth_intrin.fx, depth_intrin.fy, depth_intrin.ppx, depth_intrin.ppy,
+                                                depth_intrin.width, depth_intrin.height,
+                                                color_intrin.fx, color_intrin.fy, color_intrin.ppx, color_intrin.ppy,
+                                                color_intrin.width, color_intrin.height, {}, {}};
+                                for (int i = 0; i < 9; ++i) dc.rot[i] = depth_to_color.rotation[i];
+                                for (int i = 0; i < 3; ++i) dc.trans[i] = depth_to_color.translation[i];
+                                const auto t_vo = std::chrono::steady_clock::now();
+                                registerDepthHalf(static_cast<const uint16_t*>(depth_frame.get_data()),
+                                                  depth_frame.get_units(), dc, 2, depth_half);
+                                struct Ctx { const std::vector<float>* m; int w, h; } vctx{&depth_half,
+                                    color_intrin.width, color_intrin.height};
+                                vo_res = g_vo.process(
+                                    static_cast<const uint8_t*>(color_frame.get_data()), frame_timestamp_ms / 1000.0,
+                                    [](void* c, float u, float v) {
+                                        const Ctx* x = static_cast<const Ctx*>(c);
+                                        return depthHalfAt(*x->m, x->w, x->h, u, v);
+                                    }, &vctx);
+                                vo_res.ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t_vo).count();
+                                vo_frames++;
+                                vo_ok += vo_res.ok;
+                                vo_ms_sum += vo_res.ms;
+                                vo_speed_sum += vo_res.speed;
+                            }
+
                             // --- TRACKING: IDs, velocity, time-to-collision ---
                             if (calib_ready) {
-                                g_tracker.setIntrinsics(color_intrin.fx, color_intrin.ppx);
+                                g_tracker.setIntrinsics(color_intrin.fx, color_intrin.ppx,
+                                                        color_intrin.fy, color_intrin.ppy);
                             }
+                            g_tracker.setEgo(vo_res.ok, g_vo.poseR(), g_vo.poseT(), vo_res.vel);
                             g_tracker.update(detections, frame_timestamp_ms / 1000.0, track_info);
                         }
 
@@ -782,14 +836,18 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          "\"inferenceMs\": %.1f, \"imu\": %s, "
                                          "\"alert\": \"%s\", \"alertReason\": \"%s\", \"alertDist\": %.2f, \"alertTtc\": %.2f, "
                                          "\"safety\": {\"floor\": %s, \"camHeight\": %.2f, \"pitch\": %.1f, \"ms\": %.2f, \"semantic\": %s}, "
-                                         "\"semseg\": %s, \"viewMode\": %d, \"detections\": %s}",
+                                         "\"semseg\": %s, \"viewMode\": %d, "
+                                         "\"vo\": {\"ok\": %s, \"speed\": %.2f, \"turn\": %.1f, \"inliers\": %d, \"ms\": %.1f}, "
+                                         "\"detections\": %s}",
                                          current_fps.load(), latency, center_distance, total_dropped_frames,
                                          inference_ms, imu_json,
                                          alert_level == 2 ? "stop" : alert_level == 1 ? "caution" : "none",
                                          alert_reason, alert_dist, alert_ttc,
                                          safety.floorFound ? "true" : "false", safety.cameraHeight,
                                          safety.cameraPitchDeg, safety.ms,
-                                         safety.semanticUsed ? "true" : "false", seg_json, g_viewMode.load(), detections_json.c_str());
+                                         safety.semanticUsed ? "true" : "false", seg_json, g_viewMode.load(),
+                                         vo_res.ok ? "true" : "false", vo_res.speed, vo_res.angRate * 57.2958f,
+                                         vo_res.inliers, vo_res.ms, detections_json.c_str());
                                 
                                 ANativeWindow_unlockAndPost(nativeWindow);
                                 double render_ms = std::chrono::duration<double, std::milli>(
@@ -803,6 +861,10 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                      safety.obstacleDist, safety.headDist, safety.dropDist, safety.unknownDist,
                                      safety.stairsDist, safety.lowObstacleDist, safety.semanticUsed ? 1 : 0,
                                      safety.closingSpeed, safety.stopDistUsed);
+                                if (g_timingLogs) LOGI("VOF,%.2f,%d,%.2f,%.2f,%.2f,%.1f,%d,%.2f,%.2f,%.2f",
+                                     frame_timestamp_ms / 1000.0, vo_res.ok ? 1 : 0, vo_res.vel[0], vo_res.vel[1],
+                                     vo_res.vel[2], vo_res.angRate * 57.2958f, vo_res.inliers,
+                                     g_vo.poseT()[0], g_vo.poseT()[1], g_vo.poseT()[2]);
 
                                 // E2E,frame,capture->arrive,infer,render,arrive->post,capture->post,dets,depth
                                 double t_post_ms = e2e_now_ms();

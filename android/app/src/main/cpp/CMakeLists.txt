@@ -63,6 +63,8 @@ add_library(
         semseg.cpp
         imu_sync.cpp
         gravity_calib.cpp
+        rigid.cpp
+        vo.cpp
 )
 
 # ============================================================

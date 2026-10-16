@@ -53,6 +53,7 @@ struct SafetyResult {
     float unknownDist{-1};
     float stairsDist{-1};
     float closingSpeed{0};     // m/s toward the nearest obstacle (smoothed)
+    float walkSpeed{-1};       // user's speed along the floor ahead (odometry), -1 if none
     float stopDistUsed{0};     // effective STOP distance this frame
     float turnRateDegS{0};     // floor-normal rotation rate (head turn)
     float lowObstacleDist{-1};
@@ -77,6 +78,14 @@ public:
     // Optional: improves the floor fit when an IMU is available.
     void setGravity(float gx, float gy, float gz);
     void clearGravity() { haveGravity_ = false; }
+
+    // User's own velocity (camera axes, m/s) from visual odometry, or
+    // valid=false. Its component along the walking direction sets the
+    // speed-dependent STOP distance (with the obstacle-distance slope).
+    void setEgoVelocity(bool valid, const float velCam[3]) {
+        haveEgo_ = valid;
+        if (valid) { egoV_[0] = velCam[0]; egoV_[1] = velCam[1]; egoV_[2] = velCam[2]; }
+    }
 
     void reset();
 
@@ -159,6 +168,8 @@ private:
     Plane floor_;
     double floorTime_{-1e9};
     bool haveGravity_{false};
+    bool haveEgo_{false};
+    float egoV_[3]{0, 0, 0};
     float gx_{0}, gy_{1}, gz_{0};
 
     // Out-of-view memory of the last near obstacle.

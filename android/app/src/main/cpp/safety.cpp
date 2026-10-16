@@ -461,7 +461,13 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
         }
         closing_ = std::max(0.0f, std::min(3.0f, v));
         r.closingSpeed = closing_;
-        const float stopD = std::max(stopDist, stopMargin + closing_ * reactionSec);
+        // Walking speed from odometry along the corridor direction.
+        float approach = closing_;
+        if (haveEgo_) {
+            r.walkSpeed = std::max(0.0f, egoV_[0] * f[0] + egoV_[1] * f[1] + egoV_[2] * f[2]);
+            approach = std::max(approach, std::min(3.0f, r.walkSpeed));
+        }
+        const float stopD = std::max(stopDist, stopMargin + approach * reactionSec);
         const float cautionD = std::max(cautionDist, stopD + cautionExtra);
         r.stopDistUsed = stopD;
 

@@ -32,7 +32,17 @@ enum class MotionAlert { None = 0, Caution = 1, Stop = 2 };
 class ObjectTracker {
 public:
     // Camera intrinsics of the colour stream (pixels).
-    void setIntrinsics(float fx, float cx) { fx_ = fx; cx_ = cx; }
+    void setIntrinsics(float fx, float cx, float fy = 0, float cy = 0) {
+        fx_ = fx; cx_ = cx;
+        if (fy > 0) { fy_ = fy; cy_ = cy; }
+    }
+
+    // User's own motion from visual odometry for this frame: camera pose in
+    // the world (p_w = R p_cam + t, R row-major) and camera velocity in
+    // camera axes. With it, objects are tracked in the world frame, so a still
+    // object has ~zero velocity while the user walks toward it. Call every
+    // frame before update(); pass valid=false when odometry has no estimate.
+    void setEgo(bool valid, const float R[9], const float t[3], const float velCam[3]);
 
     // Updates tracks with this frame's detections (distances already set)
     // at time [tSec]; fills [info] (one entry per detection, same order).
@@ -55,6 +65,7 @@ public:
     float cautionTtc{4.0f};
     float corridorHalfWidth{0.6f};  // metres either side of the user
     float minClosingSpeed{0.25f};   // m/s; slower is treated as not approaching
+    float minOwnSpeed{0.3f};        // with ego-motion: the object itself must move
 
 private:
     // 1D constant-velocity Kalman filter (position, velocity).
@@ -70,7 +81,8 @@ private:
         int classId;
         float bx, by, bw, bh;    // last box (pixels)
         float bvx{0}, bvy{0};    // box centre velocity (px/s), smoothed
-        Kf kx, kz;
+        Kf kx, ky, kz;
+        bool world{false};       // filters hold world-frame positions
         int hits{0};
         double lastSeen{0};
         double lastUpdate{0};
@@ -82,7 +94,9 @@ private:
 
     std::vector<Track> tracks_;
     int nextId_{1};
-    float fx_{600.0f}, cx_{320.0f};
+    float fx_{600.0f}, cx_{320.0f}, fy_{600.0f}, cy_{240.0f};
+    bool ego_{false};
+    float egoR_[9]{1, 0, 0, 0, 1, 0, 0, 0, 1}, egoT_[3]{0, 0, 0}, egoV_[3]{0, 0, 0};
     MotionAlert alert_{MotionAlert::None};
     float alertTtc_{-1};
     int alertTrack_{-1};
