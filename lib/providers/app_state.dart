@@ -210,6 +210,8 @@ class AppState extends ChangeNotifier {
           centerDistanceMeters: (data['centerDistance'] as num?)?.toDouble() ?? 0.0,
           droppedFrames: (data['droppedFrames'] as num?)?.toInt() ?? 0,
           alert: data['alert'] as String? ?? 'none',
+          alertReason: data['alertReason'] as String? ?? 'none',
+          alertDist: (data['alertDist'] as num?)?.toDouble() ?? -1.0,
           alertTtc: (data['alertTtc'] as num?)?.toDouble() ?? -1.0,
           imu: data['imu'] is Map<String, dynamic>
               ? ImuData.fromJson(data['imu'] as Map<String, dynamic>)

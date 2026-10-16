@@ -1,0 +1,354 @@
+#include "safety.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+
+namespace {
+
+constexpr float kBin = 0.10f;          // corridor bin length (m)
+constexpr float kRadToDeg = 57.2957795f;
+
+inline float dot(const float* a, const float* b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+
+// Smallest-eigenvalue eigenvector of a symmetric 3x3 matrix (Jacobi).
+void smallestEigenvector(double A[3][3], float out[3]) {
+    double V[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+    for (int sweep = 0; sweep < 30; ++sweep) {
+        int p = 0, q = 1;
+        double maxOff = std::fabs(A[0][1]);
+        if (std::fabs(A[0][2]) > maxOff) { maxOff = std::fabs(A[0][2]); p = 0; q = 2; }
+        if (std::fabs(A[1][2]) > maxOff) { maxOff = std::fabs(A[1][2]); p = 1; q = 2; }
+        if (maxOff < 1e-12) break;
+        double theta = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+        double t = (theta >= 0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1));
+        double c = 1 / std::sqrt(t * t + 1), s = t * c;
+        for (int k = 0; k < 3; ++k) {
+            double akp = A[k][p], akq = A[k][q];
+            A[k][p] = c * akp - s * akq; A[k][q] = s * akp + c * akq;
+        }
+        for (int k = 0; k < 3; ++k) {
+            double apk = A[p][k], aqk = A[q][k];
+            A[p][k] = c * apk - s * aqk; A[q][k] = s * apk + c * aqk;
+        }
+        for (int k = 0; k < 3; ++k) {
+            double vkp = V[k][p], vkq = V[k][q];
+            V[k][p] = c * vkp - s * vkq; V[k][q] = s * vkp + c * vkq;
+        }
+    }
+    int m = 0;
+    if (A[1][1] < A[m][m]) m = 1;
+    if (A[2][2] < A[m][m]) m = 2;
+    for (int k = 0; k < 3; ++k) out[k] = static_cast<float>(V[k][m]);
+}
+
+}  // namespace
+
+
+void SafetyLayer::setGravity(float gx, float gy, float gz) {
+    float n = std::sqrt(gx*gx + gy*gy + gz*gz);
+    if (n < 1e-3f) return;
+    gx_ = gx / n; gy_ = gy / n; gz_ = gz / n;
+    haveGravity_ = true;
+}
+
+void SafetyLayer::reset() {
+    floor_ = Plane{};
+    floorTime_ = -1e9;
+    for (int& h : history_) h = 0;
+    histIdx_ = 0;
+    held_ = SafetyResult{};
+    heldUntil_ = -1e9;
+    heightSamples_.clear();
+    learnedHeight_ = -1;
+}
+
+float SafetyLayer::minPointsAt(float along) const {
+    // Sample density falls ~1/z^2; scale the evidence needed accordingly.
+    const float a = std::max(along, 0.5f);
+    return std::max(3.0f, 24.0f / (a * a) * (16.0f / (sampleStep * sampleStep)));
+}
+
+bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out) {
+    // Prior "up": previous floor if recent, else -gravity, else camera -y.
+    float up[3];
+    float tolDeg = maxFloorTiltDeg;
+    if (floor_.valid) {
+        // Tracked floor: head motion changes the tilt by a few degrees per
+        // frame at most; a larger jump would be another surface.
+        up[0] = floor_.nx; up[1] = floor_.ny; up[2] = floor_.nz; tolDeg = floorTrackTiltDeg;
+    } else if (haveGravity_) {
+        up[0] = -gx_; up[1] = -gy_; up[2] = -gz_; tolDeg = 15.0f;
+    } else {
+        up[0] = 0; up[1] = -1; up[2] = 0;
+    }
+    const float cosTol = std::cos(tolDeg / kRadToDeg);
+
+    // Candidates: all points within 0.4-4 m. Walls fail the normal check and
+    // ceilings fail the "camera above plane" check below.
+    std::vector<const P*> cand;
+    cand.reserve(pts.size());
+    for (const P& p : pts) {
+        if (p.z >= 0.4f && p.z <= 4.0f) cand.push_back(&p);
+    }
+    if (cand.size() < 50) return false;
+
+    // Scoring subset.
+    std::vector<const P*> sub;
+    const size_t stride = std::max<size_t>(1, cand.size() / 1500);
+    for (size_t i = 0; i < cand.size(); i += stride) sub.push_back(cand[i]);
+
+    std::uniform_int_distribution<size_t> pick(0, cand.size() - 1);
+    int bestCount = 0;
+    float bestScore = 0;
+    float best[4] = {0, 0, 0, 0};
+    for (int it = 0; it < ransacIters; ++it) {
+        const P* a = cand[pick(rng_)];
+        const P* b = cand[pick(rng_)];
+        const P* c = cand[pick(rng_)];
+        float e1[3] = {b->x - a->x, b->y - a->y, b->z - a->z};
+        float e2[3] = {c->x - a->x, c->y - a->y, c->z - a->z};
+        float n[3] = {e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0]};
+        float len = std::sqrt(dot(n, n));
+        if (len < 1e-6f) continue;
+        for (float& v : n) v /= len;
+        if (dot(n, up) < 0) for (float& v : n) v = -v;
+        if (dot(n, up) < cosTol) continue;
+        const float d = -(n[0]*a->x + n[1]*a->y + n[2]*a->z);
+        // Camera must be above the floor at a plausible height; once known,
+        // close to the learned eye height and continuous with the tracked floor.
+        if (d < 0.3f || d > 2.5f) continue;
+        if (learnedHeight_ > 0 && std::fabs(d - learnedHeight_) > heightTolerance) continue;
+        if (floor_.valid && std::fabs(d - floor_.d) > floorTrackTolerance) continue;
+        // Inliers weighted by nearness: the floor is the surface at the
+        // user's feet (beats a lower level beyond a step, and tabletops).
+        int count = 0;
+        float score = 0;
+        for (const P* p : sub) {
+            if (std::fabs(n[0]*p->x + n[1]*p->y + n[2]*p->z + d) < floorInlier) {
+                ++count;
+                score += 1.0f / std::max(0.5f, p->z);
+            }
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            bestCount = count;
+            best[0] = n[0]; best[1] = n[1]; best[2] = n[2]; best[3] = d;
+        }
+    }
+    if (bestCount < std::max<int>(60, static_cast<int>(sub.size() * 0.10))) return false;
+
+    // Least-squares refinement on all inliers (PCA normal).
+    double cx = 0, cy = 0, cz = 0; int n = 0;
+    for (const P* p : cand) {
+        if (std::fabs(best[0]*p->x + best[1]*p->y + best[2]*p->z + best[3]) < floorInlier) {
+            cx += p->x; cy += p->y; cz += p->z; ++n;
+        }
+    }
+    if (n < 30) return false;
+    cx /= n; cy /= n; cz /= n;
+    double C[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
+    for (const P* p : cand) {
+        if (std::fabs(best[0]*p->x + best[1]*p->y + best[2]*p->z + best[3]) < floorInlier) {
+            double v[3] = {p->x - cx, p->y - cy, p->z - cz};
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) C[i][j] += v[i] * v[j];
+        }
+    }
+    float nr[3];
+    smallestEigenvector(C, nr);
+    if (dot(nr, best) < 0) for (float& v : nr) v = -v;
+    // Keep the refined normal within the same tilt limit as the search.
+    if (dot(nr, up) < cosTol) { nr[0] = best[0]; nr[1] = best[1]; nr[2] = best[2]; }
+    float dr = -static_cast<float>(nr[0]*cx + nr[1]*cy + nr[2]*cz);
+
+    out.nx = nr[0]; out.ny = nr[1]; out.nz = nr[2]; out.d = dr; out.valid = true;
+    return true;
+}
+
+SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& in,
+                                  float units, double tSec) {
+    const auto t0 = std::chrono::steady_clock::now();
+    SafetyResult r;
+
+    // 1. Sample + back-project.
+    pts_.clear();
+    for (int v = 0; v < in.height; v += sampleStep) {
+        const uint16_t* row = depth + static_cast<size_t>(v) * in.width;
+        for (int u = 0; u < in.width; u += sampleStep) {
+            if (!row[u]) continue;
+            const float z = row[u] * units;
+            if (z < minRange || z > maxRange) continue;
+            pts_.push_back({(u - in.ppx) * z / in.fx, (v - in.ppy) * z / in.fy, z, u, v});
+        }
+    }
+    r.points = static_cast<int>(pts_.size());
+
+    // 2. Floor plane (with short memory, smoothed).
+    Plane fit;
+    if (fitFloor(pts_, fit)) {
+        if (floor_.valid) {
+            // Light smoothing only: heavy smoothing lags head nods (~2 deg)
+            // and makes the far floor look like a drop.
+            const float a = 0.85f;
+            floor_.nx = (1 - a) * floor_.nx + a * fit.nx;
+            floor_.ny = (1 - a) * floor_.ny + a * fit.ny;
+            floor_.nz = (1 - a) * floor_.nz + a * fit.nz;
+            const float len = std::sqrt(floor_.nx*floor_.nx + floor_.ny*floor_.ny + floor_.nz*floor_.nz);
+            floor_.nx /= len; floor_.ny /= len; floor_.nz /= len;
+            floor_.d = (1 - a) * floor_.d + a * fit.d;
+        } else {
+            floor_ = fit;
+        }
+        floorTime_ = tSec;
+        // Learn the camera's height above the floor from the first ~30
+        // floor fits (median), then use it to reject false floors.
+        if (learnedHeight_ < 0) {
+            heightSamples_.push_back(floor_.d);
+            if (heightSamples_.size() >= 30) {
+                std::nth_element(heightSamples_.begin(), heightSamples_.begin() + 15, heightSamples_.end());
+                learnedHeight_ = heightSamples_[15];
+            }
+        }
+    } else if (tSec - floorTime_ > floorMemorySec) {
+        floor_.valid = false;
+    }
+
+    int raw = 0;
+    SafetyReason rawReason = SafetyReason::None;
+    float rawDist = -1;
+    auto consider = [&](int level, SafetyReason why, float dist) {
+        if (level > raw || (level == raw && level > 0 && dist >= 0 && (rawDist < 0 || dist < rawDist))) {
+            raw = level; rawReason = why; rawDist = dist;
+        }
+    };
+
+    if (!floor_.valid) {
+        // No floor: fall back to anything close straight ahead.
+        int close = 0;
+        float nearest = 1e9f;
+        for (const P& p : pts_) {
+            if (p.z < stopDist && std::fabs(p.x) < corridorHalfWidth) {
+                ++close;
+                nearest = std::min(nearest, p.z);
+            }
+        }
+        if (close >= 20) consider(2, SafetyReason::Obstacle, nearest);
+        else consider(1, SafetyReason::NoFloor, -1);
+    } else {
+        r.floorFound = true;
+        const float n[3] = {floor_.nx, floor_.ny, floor_.nz};
+        r.cameraHeight = floor_.d;
+        // Pitch: angle between camera forward (z) and the floor plane.
+        r.cameraPitchDeg = std::asin(std::max(-1.0f, std::min(1.0f, -n[2]))) * kRadToDeg;
+
+        // 3-4. Corridor axes on the floor: forward f, lateral l.
+        float f[3] = {0, 0, 1};
+        const float fz = dot(f, n);
+        for (int i = 0; i < 3; ++i) f[i] -= fz * n[i];
+        float fl = std::sqrt(dot(f, f));
+        if (fl < 1e-3f) { f[0] = 0; f[1] = 1; f[2] = 0; fl = 1; }  // looking straight down
+        for (float& v : f) v /= fl;
+        const float l[3] = {n[1]*f[2] - n[2]*f[1], n[2]*f[0] - n[0]*f[2], n[0]*f[1] - n[1]*f[0]};
+
+        const int bins = static_cast<int>((corridorFar - corridorNear) / kBin + 0.5f);
+        std::vector<int> body(bins, 0), head(bins, 0), floorC(bins, 0), below(bins, 0), any(bins, 0);
+        // Nearest point in each bin per category (exact distance reporting).
+        std::vector<float> bodyMin(bins, 1e9f), headMin(bins, 1e9f), belowMin(bins, 1e9f);
+        std::vector<float> floorMax(bins, -1.0f);   // farthest floor point per bin
+
+        for (const P& p : pts_) {
+            const float pv[3] = {p.x, p.y, p.z};
+            const float along = dot(pv, f);
+            if (along < corridorNear || along >= corridorFar) continue;
+            const float lat = dot(pv, l);
+            if (std::fabs(lat) > corridorHalfWidth) continue;
+            const float h = dot(pv, n) + floor_.d;
+            const int b = static_cast<int>((along - corridorNear) / kBin);
+            any[b]++;
+            if (h > bodyMinH && h <= bodyMaxH) { body[b]++; bodyMin[b] = std::min(bodyMin[b], along); }
+            else if (h > bodyMaxH && h <= headMaxH) { head[b]++; headMin[b] = std::min(headMin[b], along); }
+            if (std::fabs(lat) < 0.30f) {
+                if (std::fabs(h) < 0.05f) { floorC[b]++; floorMax[b] = std::max(floorMax[b], along); }
+                else if (h < -dropDepth) { below[b]++; belowMin[b] = std::min(belowMin[b], along); }
+            }
+        }
+
+        // 5. Nearest body / head-height obstacle.
+        for (int b = 0; b < bins; ++b) {
+            const float a = corridorNear + b * kBin;
+            if (r.obstacleDist < 0 && body[b] >= minPointsAt(a)) r.obstacleDist = bodyMin[b];
+            if (r.headDist < 0 && head[b] >= minPointsAt(a)) r.headDist = headMin[b];
+        }
+
+        // 6. Drop-off: floor falling away along the centre strip.
+        for (int b = 0; b < bins; ++b) {
+            const float a = corridorNear + b * kBin;
+            if (a < 0.5f) continue;
+            auto isBelow = [&](int k) {
+                return k < bins && below[k] >= std::max(3.0f, minPointsAt(corridorNear + k * kBin) * 0.5f) &&
+                       below[k] > floorC[k];
+            };
+            // A real step / stair continues downward: require 2 consecutive bins.
+            if (isBelow(b) && isBelow(b + 1)) {
+                // The edge occludes the lower floor right behind it (a
+                // shadow of ~drop * distance / height), so report the edge:
+                // the farthest upper-floor point before the drop.
+                r.dropDist = belowMin[b];
+                for (int k = b; k >= 0; --k) {
+                    if (floorMax[k] > 0) { r.dropDist = std::min(r.dropDist, floorMax[k]); break; }
+                }
+                break;
+            }
+        }
+
+        // Unknown floor: the floor at this distance should be in view but no
+        // depth came back there (glass, black/shiny floor, hole).
+        for (int b = 0; b < bins; ++b) {
+            const float a = corridorNear + b * kBin;
+            if (a < 0.5f || a > unknownCautionDist) continue;
+            const float q[3] = {-floor_.d * n[0] + a * f[0], -floor_.d * n[1] + a * f[1],
+                                -floor_.d * n[2] + a * f[2]};
+            if (q[2] <= 0.1f) continue;
+            const float u = in.fx * q[0] / q[2] + in.ppx;
+            const float v = in.fy * q[1] / q[2] + in.ppy;
+            const bool inView = u >= 0 && u < in.width && v >= 0 && v < in.height;
+            if (inView && any[b] == 0) { r.unknownDist = a; break; }
+        }
+
+        // 7a. Raw decision.
+        auto level = [&](float dist, float stop, float caution) {
+            return dist < 0 ? 0 : dist < stop ? 2 : dist < caution ? 1 : 0;
+        };
+        consider(level(r.obstacleDist, stopDist, cautionDist), SafetyReason::Obstacle, r.obstacleDist);
+        consider(level(r.headDist, stopDist, cautionDist), SafetyReason::HeadHeight, r.headDist);
+        consider(level(r.dropDist, dropStopDist, dropCautionDist), SafetyReason::DropOff, r.dropDist);
+        if (r.unknownDist >= 0) consider(1, SafetyReason::UnknownFloor, r.unknownDist);
+    }
+
+    // 7b. Confirmation: a level counts when seen in 2 of the last 3 frames.
+    history_[histIdx_] = raw;
+    histIdx_ = (histIdx_ + 1) % 3;
+    auto seen = [&](int lvl) { int c = 0; for (int h : history_) if (h >= lvl) ++c; return c >= 2; };
+    const int confirmed = seen(2) ? 2 : seen(1) ? 1 : 0;
+
+    r.state = static_cast<SafetyState>(confirmed);
+    if (confirmed > 0) {
+        r.reason = raw >= confirmed ? rawReason : held_.reason;
+        r.distance = raw >= confirmed ? rawDist : held_.distance;
+    }
+
+    // 7c. Hold: keep a warning for holdSec so it doesn't flicker.
+    if (confirmed > 0 && confirmed >= static_cast<int>(held_.state)) {
+        held_ = r;
+        heldUntil_ = tSec + holdSec;
+    } else if (tSec < heldUntil_ && static_cast<int>(held_.state) > confirmed) {
+        r.state = held_.state;
+        r.reason = held_.reason;
+        r.distance = held_.distance;
+    } else if (tSec >= heldUntil_) {
+        held_ = SafetyResult{};
+    }
+
+    r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return r;
+}

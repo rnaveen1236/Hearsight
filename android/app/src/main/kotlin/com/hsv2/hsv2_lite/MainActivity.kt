@@ -1046,11 +1046,13 @@ class MainActivity : FlutterActivity() {
 
     private var lastAlertVibrationMs = 0L
 
-    // Vibrates on a STOP alert (object on a collision course), at most 1/s.
+    // Vibration: STOP = three fast pulses (max 1/s),
+    // CAUTION = one long pulse (max every 2 s).
     private fun vibrateOnAlert(alert: String) {
-        if (alert != "stop") return
+        if (alert != "stop" && alert != "caution") return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastAlertVibrationMs < 1000) return
+        val minGap = if (alert == "stop") 1000 else 2000
+        if (now - lastAlertVibrationMs < minGap) return
         lastAlertVibrationMs = now
         try {
             val vibrator =
@@ -1059,10 +1061,10 @@ class MainActivity : FlutterActivity() {
                 else
                     @Suppress("DEPRECATION")
                     (getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator)
-            // STOP: three fast pulses.
-            vibrator.vibrate(
-                android.os.VibrationEffect.createWaveform(longArrayOf(0, 120, 80, 120, 80, 120), -1)
-            )
+            val pattern =
+                if (alert == "stop") longArrayOf(0, 120, 80, 120, 80, 120)
+                else longArrayOf(0, 400)
+            vibrator.vibrate(android.os.VibrationEffect.createWaveform(pattern, -1))
         } catch (e: Exception) {
             Log.w(LOG_TAG, "Vibration failed", e)
         }

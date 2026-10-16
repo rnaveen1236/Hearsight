@@ -19,6 +19,7 @@
 #include "yolo_detector.h"
 #include "imu.h"
 #include "tracker.h"
+#include "safety.h"
 
 QnnRuntime g_qnnRuntime;
 YoloDetector g_detector;
@@ -28,6 +29,8 @@ std::atomic<bool> g_qnnInitialized(false);
 ImuStreamer g_imu;
 // Track IDs, velocity and time-to-collision for detections (stream thread only).
 ObjectTracker g_tracker;
+// Layer 1 reactive safety (floor, corridor, head height, drop-off) from live depth.
+SafetyLayer g_safety;
 rs2::device g_rsDevice;  // the pipeline's active device (shared with the IMU)
 // IMU start is deferred until the colour/depth stream is flowing; see the
 // stream thread. Starting the D455 motion sensor at pipeline start wedged
@@ -236,6 +239,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
         }
         g_streamFps = fps;
         g_tracker.reset();
+        g_safety.reset();
         g_imuEnabled = imuEnabled;
         LOGI("Streaming colour+depth 640x480 @ %d fps", fps);
 
@@ -509,6 +513,17 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             last_time = now;
                         }
                         
+                        // --- LAYER 1 REACTIVE SAFETY (live depth only) ---
+                        SafetyResult safety;
+                        if (depth_frame && calib_ready) {
+                            const DepthIntrinsics din{depth_intrin.fx, depth_intrin.fy,
+                                                      depth_intrin.ppx, depth_intrin.ppy,
+                                                      depth_intrin.width, depth_intrin.height};
+                            safety = g_safety.process(
+                                static_cast<const uint16_t*>(depth_frame.get_data()), din,
+                                depth_frame.get_units(), frame_timestamp_ms / 1000.0);
+                        }
+
                         // --- INFERENCE (NPU) ---
                         std::vector<Detection> detections;
                         std::vector<TrackInfo> track_info;
@@ -654,6 +669,25 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          imu.accel[0], imu.accel[1], imu.accel[2],
                                          imu.gyroHz, imu.accelHz);
 
+                                // Combined alert: most severe of Layer 1 safety and
+                                // moving objects (time-to-collision).
+                                int alert_level = static_cast<int>(safety.state);
+                                const char* alert_reason =
+                                    safety.reason == SafetyReason::Obstacle ? "obstacle"
+                                    : safety.reason == SafetyReason::HeadHeight ? "head"
+                                    : safety.reason == SafetyReason::DropOff ? "dropoff"
+                                    : safety.reason == SafetyReason::UnknownFloor ? "unknown"
+                                    : safety.reason == SafetyReason::NoFloor ? "nofloor" : "none";
+                                float alert_dist = safety.distance;
+                                float alert_ttc = -1.0f;
+                                const int moving = static_cast<int>(g_tracker.alert());
+                                if (moving > alert_level) {
+                                    alert_level = moving;
+                                    alert_reason = "moving";
+                                    alert_dist = -1.0f;
+                                    alert_ttc = g_tracker.alertTtc();
+                                }
+
                                 std::string detections_json = "[";
                                 for (size_t i = 0; i < detections.size(); ++i) {
                                     const Detection& d = detections[i];
@@ -677,12 +711,16 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                          "\"cpu\": 30.0, \"gpu\": 15.0, \"npu\": 5.0, \"thermal\": 38.0, "
                                          "\"battery\": 100.0, \"centerDistance\": %.2f, \"droppedFrames\": %d, "
                                          "\"inferenceMs\": %.1f, \"imu\": %s, "
-                                         "\"alert\": \"%s\", \"alertTtc\": %.2f, \"detections\": %s}",
+                                         "\"alert\": \"%s\", \"alertReason\": \"%s\", \"alertDist\": %.2f, \"alertTtc\": %.2f, "
+                                         "\"safety\": {\"floor\": %s, \"camHeight\": %.2f, \"pitch\": %.1f, \"ms\": %.2f}, "
+                                         "\"detections\": %s}",
                                          current_fps.load(), latency, center_distance, total_dropped_frames,
                                          inference_ms, imu_json,
-                                         g_tracker.alert() == MotionAlert::Stop ? "stop"
-                                             : g_tracker.alert() == MotionAlert::Caution ? "caution" : "none",
-                                         g_tracker.alertTtc(), detections_json.c_str());
+                                         alert_level == 2 ? "stop" : alert_level == 1 ? "caution" : "none",
+                                         alert_reason, alert_dist, alert_ttc,
+                                         safety.floorFound ? "true" : "false", safety.cameraHeight,
+                                         safety.cameraPitchDeg, safety.ms,
+                                         detections_json.c_str());
                                 
                                 ANativeWindow_unlockAndPost(nativeWindow);
                                 double render_ms = std::chrono::duration<double, std::milli>(

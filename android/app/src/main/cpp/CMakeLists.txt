@@ -59,6 +59,7 @@ add_library(
         yolo_detector.cpp
         imu.cpp
         tracker.cpp
+        safety.cpp
 )
 
 # ============================================================

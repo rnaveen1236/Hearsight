@@ -245,10 +245,20 @@ class _HomeScreenState extends State<HomeScreen> {
     return Colors.grey;
   }
 
-  // STOP (red) / CAUTION (amber) banner for objects on a collision course.
+  // STOP (red) / CAUTION (amber) banner: Layer 1 safety or moving objects.
   Widget _motionAlertBanner(TelemetryData t) {
     final stop = t.alert == 'stop';
+    final dist = t.alertDist > 0 ? ' ${t.alertDist.toStringAsFixed(1)} m' : '';
     final ttc = t.alertTtc > 0 ? ' · ${t.alertTtc.toStringAsFixed(1)} s' : '';
+    final what = switch (t.alertReason) {
+      'obstacle' => 'obstacle ahead$dist',
+      'head' => 'head-height obstacle$dist',
+      'dropoff' => 'step down$dist',
+      'unknown' => 'unknown ground$dist',
+      'nofloor' => 'cannot see the floor',
+      'moving' => 'object approaching$ttc',
+      _ => 'hazard',
+    };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
@@ -256,7 +266,7 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(
-        stop ? 'STOP · object approaching$ttc' : 'CAUTION · object approaching$ttc',
+        '${stop ? 'STOP' : 'CAUTION'} · $what',
         style: const TextStyle(color: Colors.black, fontSize: 18, fontWeight: FontWeight.bold),
       ),
     );

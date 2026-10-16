@@ -76,8 +76,11 @@ class TelemetryData {
   final int droppedFrames;
   final double usbTransportLatencyMs;
   final double centerDistanceMeters;
-  final String alert;          // "none" | "caution" | "stop" (moving objects)
-  final double alertTtc;       // seconds
+  final String alert;          // "none" | "caution" | "stop"
+  // obstacle | head | dropoff | unknown | nofloor | moving
+  final String alertReason;
+  final double alertDist;      // metres to the hazard (-1 if n/a)
+  final double alertTtc;       // seconds (moving objects)
   final ImuData imu;
 
   TelemetryData({
@@ -94,6 +97,8 @@ class TelemetryData {
     this.usbTransportLatencyMs = 0.0,
     this.centerDistanceMeters = 0.0,
     this.alert = 'none',
+    this.alertReason = 'none',
+    this.alertDist = -1.0,
     this.alertTtc = -1.0,
     this.imu = const ImuData(),
   });
