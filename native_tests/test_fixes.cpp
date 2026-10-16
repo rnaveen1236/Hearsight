@@ -74,6 +74,31 @@ int main(){
                heldSec, heldSec>=1.5 && heldSec<=3.0 ? "OK":"FAIL");
         if (!(heldSec>=1.5 && heldSec<=3.0)) ++fail;
     }
+    // 2b. Same, but the user stepped back to 2.2 m (CAUTION) before
+    //     raising the head: the CAUTION must be held too.
+    {
+        SafetyLayer L; Scene s{"box",{{-0.25f,0,2.2f,0.25f,0.30f,2.6f}}}; CAM_H=1.6f;
+        double lastAlarm=-1;
+        for (int f=0; f<210; ++f) { double t=f/30.0;
+            float p = t<3.0 ? 40.0f : t<3.3 ? 40.0f-45.0f*(float)((t-3.0)/0.3) : -5.0f; PITCH=p*DEG;
+            auto img=render(s,rng); auto r=L.process(img.data(),in,0.001f,t);
+            if (r.state!=SafetyState::Clear) lastAlarm=t; }
+        const double heldSec = lastAlarm-3.3;
+        printf("2b look up 2.2 m from a box (CAUTION)  : alert held %.1f s after it left the view  %s\n",
+               heldSec, heldSec>=1.5 && heldSec<=3.0 ? "OK":"FAIL");
+        if (!(heldSec>=1.5 && heldSec<=3.0)) ++fail;
+    }
+    // 1b. Very fast nod down (38 -> 51 deg in 0.3 s, seen on the phone)
+    //     over flat floor, repeated: no drop-off.
+    {
+        SafetyLayer L; int drop=0; Scene s{"flat"}; CAM_H=1.6f;
+        for (int f=0; f<300; ++f) { double t=f/30.0; double ph=std::fmod(t,1.5);
+            float p = ph<0.3 ? 25+30*(float)(ph/0.3) : ph<0.6 ? 55-30*(float)((ph-0.3)/0.3) : 25; PITCH=p*DEG;
+            auto img=render(s,rng); auto r=L.process(img.data(),in,0.001f,t);
+            if (f>=60 && r.reason==SafetyReason::DropOff) ++drop; }
+        printf("1b sharp nods 25-55 deg in 0.3 s       : drop-off frames %d  %s\n", drop, drop==0?"OK":"FAIL");
+        if (drop) ++fail;
+    }
     // 3. Walking speed: first STOP distance to a box when approaching at
     //    0.5 m/s and 1.5 m/s from 4 m. Faster walking must stop earlier.
     float stopAt[2];

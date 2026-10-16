@@ -61,6 +61,9 @@ void SafetyLayer::reset() {
     heldUntil_ = -1e9;
     memoDist_ = -1;
     memoTime_ = -1e9;
+    memoLevel_ = 0;
+    prevNTime_ = -1e9;
+    lastFarDropTime_ = -1e9;
     nearHist_.clear();
     closing_ = 0;
     lastObs_ = lastHead_ = -1;
@@ -282,7 +285,7 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
             }
         }
         if (close >= 20) consider(2, SafetyReason::Obstacle, nearest);
-        else if (memoDist_ > 0 && tSec - memoTime_ < outOfViewHoldSec) consider(2, memoReason_, memoDist_);
+        else if (memoDist_ > 0 && tSec - memoTime_ < outOfViewHoldSec) consider(memoLevel_, memoReason_, memoDist_);
         else consider(1, SafetyReason::NoFloor, -1);
     } else {
         r.floorFound = true;
@@ -376,12 +379,24 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
             if (inView && any[b] == 0) { r.unknownDist = a; break; }
         }
 
+        // Head turn rate from the floor normal; ignore drop evidence during
+        // fast nods.
+        if (tSec > prevNTime_ && tSec - prevNTime_ < 0.2) {
+            const float c = std::max(-1.0f, std::min(1.0f, dot(n, prevN_)));
+            r.turnRateDegS = std::acos(c) * kRadToDeg / static_cast<float>(tSec - prevNTime_);
+        }
+        prevN_[0] = n[0]; prevN_[1] = n[1]; prevN_[2] = n[2];
+        prevNTime_ = tSec;
+        if (r.turnRateDegS > maxTurnRateDegS) r.dropDist = -1;
+
         // Drop-off guards: trust a drop only when the floor fit sits at the
         // learned eye height, and when it persists over several frames.
         if (r.dropDist >= 0 && learnedHeight_ > 0 &&
             std::fabs(floor_.d - learnedHeight_) > heightTolerance) {
             r.dropDist = -1;
         }
+        if (r.dropDist >= nearDropDist) lastFarDropTime_ = tSec;
+        else if (r.dropDist >= 0 && tSec - lastFarDropTime_ > nearDropSec) r.dropDist = -1;
         dropHist_[dropIdx_] = r.dropDist >= 0 ? 1 : 0;
         dropIdx_ = (dropIdx_ + 1) % 6;
         int dropSeen = 0;
@@ -436,7 +451,12 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
         // Out-of-view memory: remember a near obstacle; if it is no longer
         // detected because its place on the floor left the view (head
         // raised), keep the STOP for outOfViewHoldSec.
-        if (nearest >= 0 && nearest < stopD) {
+        const int nearLevel = nearest < 0 ? 0 : nearest < stopD ? 2 : nearest < cautionD ? 1 : 0;
+        const bool memoFresh = memoDist_ > 0 && tSec - memoTime_ < outOfViewHoldSec;
+        // Never lower a fresh remembered alert (while the head comes up the
+        // obstacle is briefly seen farther away).
+        if (nearLevel > 0 && !(memoFresh && nearLevel < memoLevel_)) {
+            memoLevel_ = nearLevel;
             memoDist_ = nearest;
             memoTime_ = tSec;
             memoReason_ = (r.headDist >= 0 && r.headDist <= nearest) ? SafetyReason::HeadHeight
@@ -452,7 +472,7 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
                 inView = u >= 0 && u < in.width && v >= 0 && v < in.height;
             }
             if (inView) memoDist_ = -1;   // visible again and clear: forget it
-            else consider(2, memoReason_, memoDist_);
+            else consider(memoLevel_, memoReason_, memoDist_);
         }
         // A drop with stairs labelled near it is reported as stairs.
         const bool dropIsStairs = r.dropDist >= 0 && r.stairsDist >= 0 &&

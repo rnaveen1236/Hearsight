@@ -52,6 +52,7 @@ struct SafetyResult {
     float stairsDist{-1};
     float closingSpeed{0};     // m/s toward the nearest obstacle (smoothed)
     float stopDistUsed{0};     // effective STOP distance this frame
+    float turnRateDegS{0};     // floor-normal rotation rate (head turn)
     float lowObstacleDist{-1};
     bool semanticUsed{false};
     int points{0};
@@ -124,6 +125,14 @@ public:
     // An obstacle missed for a frame or two (point count at the threshold)
     // is kept this long; closing speed is fitted over speedWindowSec.
     double persistSec{0.3};
+    // Drop-off evidence is ignored while the head turns faster than this
+    // (the floor fit lags a fast nod and the floor ahead looks lower).
+    float maxTurnRateDegS{80.0f};
+    // A drop-off nearer than nearDropDist must have been seen farther away
+    // within nearDropSec (a real step is seen while approaching; a sudden
+    // near "drop" is a fit error).
+    float nearDropDist{0.8f};
+    double nearDropSec{1.5};
     double speedWindowSec{1.0};
     double floorMemorySec{1.0};
 
@@ -148,6 +157,11 @@ private:
     float memoDist_{-1};
     double memoTime_{-1e9};
     SafetyReason memoReason_{SafetyReason::None};
+    int memoLevel_{0};
+    // Previous floor normal, for the head turn rate.
+    float prevN_[3]{0, 0, 0};
+    double prevNTime_{-1e9};
+    double lastFarDropTime_{-1e9};
     // Recent nearest-obstacle distances (time, metres) for the closing
     // speed (line fit over speedWindowSec, robust to missed frames).
     std::vector<std::pair<double, float>> nearHist_;
