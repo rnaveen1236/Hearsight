@@ -64,6 +64,7 @@ void SafetyLayer::reset() {
     memoLevel_ = 0;
     prevNTime_ = -1e9;
     lastFarDropTime_ = -1e9;
+    gravityFitFailSince_ = -1;
     nearHist_.clear();
     closing_ = 0;
     lastObs_ = lastHead_ = -1;
@@ -80,16 +81,19 @@ float SafetyLayer::minPointsAt(float along) const {
     return std::max(3.0f, 24.0f / (a * a) * (16.0f / (sampleStep * sampleStep)));
 }
 
-bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out, bool walkableOnly) {
+bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out, bool walkableOnly,
+                           bool useGravity) {
     // Prior "up": previous floor if recent, else -gravity, else camera -y.
     float up[3];
     float tolDeg = maxFloorTiltDeg;
-    if (floor_.valid) {
+    if (haveGravity_ && useGravity) {
+        // Gravity at this frame's capture time: the floor is level, so its
+        // normal is "up" within the IMU / mount error, whatever the head does.
+        up[0] = -gx_; up[1] = -gy_; up[2] = -gz_; tolDeg = gravityTiltDeg;
+    } else if (floor_.valid) {
         // Tracked floor: head motion changes the tilt by a few degrees per
         // frame at most; a larger jump would be another surface.
         up[0] = floor_.nx; up[1] = floor_.ny; up[2] = floor_.nz; tolDeg = floorTrackTiltDeg;
-    } else if (haveGravity_) {
-        up[0] = -gx_; up[1] = -gy_; up[2] = -gz_; tolDeg = 15.0f;
     } else {
         up[0] = 0; up[1] = -1; up[2] = 0;
     }
@@ -174,6 +178,13 @@ bool SafetyLayer::fitFloor(const std::vector<P>& pts, Plane& out, bool walkableO
     // Keep the refined normal within the same tilt limit as the search.
     if (dot(nr, up) < cosTol) { nr[0] = best[0]; nr[1] = best[1]; nr[2] = best[2]; }
     float dr = -static_cast<float>(nr[0]*cx + nr[1]*cy + nr[2]*cz);
+    // The refinement can tilt onto a plane mixing two levels (near upper floor
+    // + lower floor beyond a step); it must keep the learned eye height and
+    // continuity like the hypotheses do, else keep the hypothesis plane.
+    if ((learnedHeight_ > 0 && std::fabs(dr - learnedHeight_) > heightTolerance) ||
+        (floor_.valid && std::fabs(dr - floor_.d) > floorTrackTolerance)) {
+        nr[0] = best[0]; nr[1] = best[1]; nr[2] = best[2]; dr = best[3];
+    }
 
     out.nx = nr[0]; out.ny = nr[1]; out.nz = nr[2]; out.d = dr; out.valid = true;
     return true;
@@ -223,7 +234,16 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
     Plane fit;
     // Walkable-only fit when the segmentation sees enough floor, else all points.
     const bool walkableOnly = useSem && walkable >= minWalkableForFit;
-    if (fitFloor(pts_, fit, walkableOnly) || (walkableOnly && fitFloor(pts_, fit, false))) {
+    // Gravity-pinned fit first; if the IMU / mount error is larger than the
+    // tight tolerance and nothing fits, fall back to the tracked fit.
+    bool fitted = fitFloor(pts_, fit, walkableOnly) || (walkableOnly && fitFloor(pts_, fit, false));
+    if (haveGravity_) {
+        if (fitted) gravityFitFailSince_ = -1;
+        else if (gravityFitFailSince_ < 0) gravityFitFailSince_ = tSec;
+        if (!fitted && tSec - gravityFitFailSince_ >= gravityFallbackSec)
+            fitted = fitFloor(pts_, fit, false, false);
+    }
+    if (fitted) {
         if (floor_.valid) {
             // Light smoothing only: heavy smoothing lags head nods (~2 deg)
             // and makes the far floor look like a drop.
@@ -290,6 +310,8 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
     } else {
         r.floorFound = true;
         const float n[3] = {floor_.nx, floor_.ny, floor_.nz};
+        r.floorNormal[0] = n[0]; r.floorNormal[1] = n[1]; r.floorNormal[2] = n[2];
+        r.gravityUsed = haveGravity_;
         r.cameraHeight = floor_.d;
         // Pitch: angle between camera forward (z) and the floor plane.
         r.cameraPitchDeg = std::asin(std::max(-1.0f, std::min(1.0f, -n[2]))) * kRadToDeg;
@@ -387,7 +409,9 @@ SafetyResult SafetyLayer::process(const uint16_t* depth, const DepthIntrinsics& 
         }
         prevN_[0] = n[0]; prevN_[1] = n[1]; prevN_[2] = n[2];
         prevNTime_ = tSec;
-        if (r.turnRateDegS > maxTurnRateDegS) r.dropDist = -1;
+        // Without gravity only: with it, the fit's tilt is pinned to the IMU
+        // and floor-normal jumps near a step are not head motion.
+        if (!haveGravity_ && r.turnRateDegS > maxTurnRateDegS) r.dropDist = -1;
 
         // Drop-off guards: trust a drop only when the floor fit sits at the
         // learned eye height, and when it persists over several frames.

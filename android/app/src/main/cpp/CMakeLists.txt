@@ -61,6 +61,8 @@ add_library(
         tracker.cpp
         safety.cpp
         semseg.cpp
+        imu_sync.cpp
+        gravity_calib.cpp
 )
 
 # ============================================================

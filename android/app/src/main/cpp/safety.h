@@ -43,6 +43,8 @@ struct SafetyResult {
 
     // Diagnostics.
     bool floorFound{false};
+    float floorNormal[3]{0, 0, 0};   // "up" in depth camera axes (when floorFound)
+    bool gravityUsed{false};
     float cameraHeight{0};     // metres above the floor
     float cameraPitchDeg{0};   // + = looking down
     float obstacleDist{-1};
@@ -90,6 +92,12 @@ public:
     float unknownCautionDist{1.2f};
     float floorInlier{0.04f};
     float maxFloorTiltDeg{35.0f};         // allowed normal deviation from "up"
+    // With gravity, the floor normal must stay within this of -gravity on
+    // every frame (instead of following the previous fit, which lags nods).
+    float gravityTiltDeg{2.0f};
+    // Fall back to the tracked (non-gravity) fit only after the tight fit has
+    // failed this long (a real IMU / mount bias, not a brief miss at a step).
+    double gravityFallbackSec{0.5};
     int ransacIters{120};
     // Floor continuity: a tracked floor may change height by at most this
     // much per frame, so a lower level ahead is a drop, not a new floor.
@@ -127,7 +135,7 @@ public:
     double persistSec{0.3};
     // Drop-off evidence is ignored while the head turns faster than this
     // (the floor fit lags a fast nod and the floor ahead looks lower).
-    float maxTurnRateDegS{80.0f};
+    float maxTurnRateDegS{1e9f};   // disabled: fit jumps near a step read as fast turns and hid real drops
     // A drop-off nearer than nearDropDist must have been seen farther away
     // within nearDropSec (a real step is seen while approaching; a sudden
     // near "drop" is a fit error).
@@ -140,7 +148,7 @@ private:
     struct P { float x, y, z; int u, v; uint8_t role; };
     struct Plane { float nx, ny, nz, d; bool valid{false}; };  // n·p + d = 0, n = up
 
-    bool fitFloor(const std::vector<P>& pts, Plane& out, bool walkableOnly);
+    bool fitFloor(const std::vector<P>& pts, Plane& out, bool walkableOnly, bool useGravity = true);
     float minPointsAt(float along) const;
 
     std::vector<P> pts_;
@@ -162,6 +170,7 @@ private:
     float prevN_[3]{0, 0, 0};
     double prevNTime_{-1e9};
     double lastFarDropTime_{-1e9};
+    double gravityFitFailSince_{-1};   // first frame the gravity-pinned fit failed
     // Recent nearest-obstacle distances (time, metres) for the closing
     // speed (line fit over speedWindowSec, robust to missed frames).
     std::vector<std::pair<double, float>> nearHist_;

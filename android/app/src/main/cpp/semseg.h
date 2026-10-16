@@ -19,24 +19,7 @@
  * The 150 ADE20K classes are merged into a few navigation classes.
  * Input: RGB uint8 NHWC (inW x inH). Output: int32 class map at 1/4 size.
  */
-enum NavClass : uint8_t {
-    kNavObstacle = 0,  // furniture, objects, anything not listed below
-    kNavFloor,         // floor, rug: walkable indoors
-    kNavWall,          // wall, window, curtain, mirror, column, fence
-    kNavDoor,
-    kNavStairs,        // stairs, stairway, step, escalator
-    kNavCeiling,
-    kNavPerson,
-    kNavVehicle,       // car, bus, truck, bicycle, ...
-    kNavRoad,
-    kNavSidewalk,      // sidewalk, path
-    kNavTerrain,       // grass, earth, sand, field
-    kNavWater,
-    kNavSky,
-    kNavVegetation,    // tree, plant, flower
-    kNavBuilding,
-    kNavCount
-};
+#include "nav_classes.h"
 
 const char* navClassName(int c);
 // RGB display colour of a navigation class.

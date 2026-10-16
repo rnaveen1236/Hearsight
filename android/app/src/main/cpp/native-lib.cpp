@@ -534,15 +534,8 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             frame_timestamp_ms / 1000.0 - seg_map.frameTimeSec < 0.3) {
                             if (seg_roles_seq != seg_map.seq) {
                                 seg_roles.resize(seg_map.cls.size());
-                                for (size_t i = 0; i < seg_roles.size(); ++i) {
-                                    switch (seg_map.cls[i]) {
-                                        case kNavFloor: case kNavRoad: case kNavSidewalk: case kNavTerrain:
-                                            seg_roles[i] = kSemWalkable; break;
-                                        case kNavStairs: seg_roles[i] = kSemStairs; break;
-                                        case kNavObstacle: case kNavVehicle: seg_roles[i] = kSemObstacle; break;
-                                        default: seg_roles[i] = kSemOther;
-                                    }
-                                }
+                                for (size_t i = 0; i < seg_roles.size(); ++i)
+                                    seg_roles[i] = navToSemRole(seg_map.cls[i]);
                                 seg_roles_seq = seg_map.seq;
                             }
                             sem_in.roles = seg_roles.data();

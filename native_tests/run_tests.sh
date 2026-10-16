@@ -10,6 +10,8 @@ for t in test_safety test_walk test_walkstep test_semantic test_fixes; do
   g++ -std=c++17 -O2 -Wall -I"$SRC" "$t.cpp" "$SRC/safety.cpp" -o "$OUT/$t"
   echo "== $t"; "$OUT/$t"
 done
+g++ -std=c++17 -O2 -Wall -I"$SRC" test_gravity.cpp "$SRC/safety.cpp" "$SRC/gravity_calib.cpp" -o "$OUT/test_gravity"
+echo "== test_gravity"; "$OUT/test_gravity"
 # The tracker includes QNN headers (via yolo_detector.h).
 QNN=${QNN_SDK_ROOT:-/home/naveen/Downloads/qairt/2.47.0.260601}/include
 g++ -std=c++17 -O2 -Wall -I"$SRC" -I"$QNN" -I"$QNN/QNN" -I"$QNN/QNN/System" test_tracker.cpp "$SRC/tracker.cpp" -o "$OUT/test_tracker"
