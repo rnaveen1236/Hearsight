@@ -41,7 +41,11 @@ constexpr int kImuStartAfterFrames = 30;
 // exhaust the per-app log quota. Enable: adb shell setprop debug.hsv2.timing 1
 std::atomic<bool> g_timingLogs(false);
 // Consecutive wait_for_frames timeouts before telemetry reports no_frames.
-constexpr int kNoFrameTimeouts = 2;
+// Timeouts are 1 s, so a stall is reported (and the alert cleared) within
+// about a second; after kStallRestartTimeouts the pipeline is restarted.
+constexpr int kNoFrameTimeouts = 1;
+constexpr int kFrameTimeoutMs = 1000;
+constexpr int kStallRestartTimeouts = 3;
 
 // Depth auto-recovery: a UVC watchdog reset of the depth endpoint at stream
 // start can leave depth frames empty (0.2-0.5% valid pixels vs 54-81% in
@@ -325,7 +329,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                 if (currentStage >= 1) {
                     try {
                         auto t_wait = std::chrono::steady_clock::now();
-                        rs2::frameset frames = rs_pipe->wait_for_frames(5000); // 5s timeout
+                        rs2::frameset frames = rs_pipe->wait_for_frames(kFrameTimeoutMs);
                         consecutive_timeouts = 0;
                         stats_wait_sum += std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t_wait).count();
@@ -747,6 +751,21 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             snprintf(telemetry_json, sizeof(telemetry_json),
                                      "{\"status\": \"no_frames\", \"fps\": 0.0, \"detections\": []}");
                             current_fps = 0.0;
+                        }
+                        if (consecutive_timeouts % kStallRestartTimeouts == 0) {
+                            // Whole stream stalled (no colour either): restart it.
+                            LOGE("No frames for %d s; restarting pipeline @ %d fps",
+                                 consecutive_timeouts, g_streamFps);
+                            g_imu.stop();
+                            try {
+                                try { rs_pipe->stop(); } catch (...) {}
+                                startPipelineAt(g_streamFps);
+                                g_imuPending = g_imuEnabled;
+                                calib_ready = false;
+                                LOGI("Pipeline restarted (stall recovery)");
+                            } catch (const std::exception& re) {
+                                LOGE("Stall recovery restart failed: %s", re.what());
+                            }
                         }
                     }
                 }
