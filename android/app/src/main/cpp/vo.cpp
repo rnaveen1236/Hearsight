@@ -331,3 +331,89 @@ VoResult VisualOdometry::process(const uint8_t* rgba, double tSec, VoDepthFn dep
     r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return r;
 }
+
+void VoThread::start(const VoCamera& cam, const DepthToColor& reg) {
+    stop();
+    vo_.setCamera(cam);
+    vo_.reset();
+    reg_ = reg;
+    quit_ = false;
+    resT_ = -1;
+    running_ = true;
+    thread_ = std::thread(&VoThread::loop, this);
+}
+
+void VoThread::stop() {
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        quit_ = true;
+    }
+    cv_.notify_all();
+    if (thread_.joinable()) thread_.join();
+    running_ = false;
+}
+
+void VoThread::reset() {
+    std::lock_guard<std::mutex> lk(m_);
+    resetReq_ = true;
+    resT_ = -1;
+}
+
+void VoThread::submit(const uint8_t* rgba, const uint16_t* depth, float depthUnits, double tSec) {
+    std::unique_lock<std::mutex> lk(m_);
+    if (!running_ || busy_ || pending_) return;
+    rgba_.assign(rgba, rgba + static_cast<size_t>(reg_.cw) * reg_.ch * 4);
+    depth_.assign(depth, depth + static_cast<size_t>(reg_.dw) * reg_.dh);
+    units_ = depthUnits;
+    t_ = tSec;
+    pending_ = true;
+    lk.unlock();
+    cv_.notify_one();
+}
+
+bool VoThread::latest(VoResult& r, float R[9], float t[3], double& tSec) const {
+    std::lock_guard<std::mutex> lk(m_);
+    if (resT_ < 0) return false;
+    r = res_;
+    for (int i = 0; i < 9; ++i) R[i] = R_[i];
+    for (int i = 0; i < 3; ++i) t[i] = T_[i];
+    tSec = resT_;
+    return true;
+}
+
+void VoThread::loop() {
+    std::vector<uint8_t> rgba;
+    std::vector<uint16_t> depth;
+    std::vector<float> half;
+    for (;;) {
+        double t;
+        float units;
+        {
+            std::unique_lock<std::mutex> lk(m_);
+            cv_.wait(lk, [&] { return quit_ || pending_; });
+            if (quit_) break;
+            rgba.swap(rgba_);
+            depth.swap(depth_);
+            t = t_;
+            units = units_;
+            pending_ = false;
+            busy_ = true;
+            if (resetReq_) { vo_.reset(); resetReq_ = false; }
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        registerDepthHalf(depth.data(), units, reg_, 2, half);
+        struct Ctx { const std::vector<float>* m; int w, h; } ctx{&half, reg_.cw, reg_.ch};
+        VoResult r = vo_.process(rgba.data(), t,
+                                 [](void* c, float u, float v) {
+                                     const Ctx* x = static_cast<const Ctx*>(c);
+                                     return depthHalfAt(*x->m, x->w, x->h, u, v);
+                                 }, &ctx);
+        r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::lock_guard<std::mutex> lk(m_);
+        res_ = r;
+        for (int i = 0; i < 9; ++i) R_[i] = vo_.poseR()[i];
+        for (int i = 0; i < 3; ++i) T_[i] = vo_.poseT()[i];
+        resT_ = t;
+        busy_ = false;
+    }
+}

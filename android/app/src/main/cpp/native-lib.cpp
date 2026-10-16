@@ -36,7 +36,7 @@ SafetyLayer g_safety;
 // Whole-scene semantic segmentation on its own worker thread (~10-15 Hz).
 SemanticSegmenter g_semseg;
 // Visual odometry (Phase 3): the user's own motion; stream thread only.
-VisualOdometry g_vo;
+VoThread g_vo;
 bool g_voEnabled = true;   // adb shell setprop debug.hsv2.vo 0 disables
 // 0 = camera only, 1 = camera + segmentation overlay, 2 = segmentation only.
 std::atomic<int> g_viewMode(1);
@@ -252,7 +252,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
         }
         g_streamFps = fps;
         g_tracker.reset();
-        g_vo.reset();
+        g_vo.stop();   // restarted with the camera calibration on the first frame
         g_voEnabled = debugPropEnabled("debug.hsv2.vo", true);
         g_safety.reset();
         g_imuEnabled = imuEnabled;
@@ -311,8 +311,9 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
             int frame_count = 0;
             int consecutive_timeouts = 0;
             SegMap seg_map;
-            std::vector<float> depth_half;   // depth registered to colour, half res
             VoResult vo_res;
+            float vo_R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, vo_T[3] = {0, 0, 0};
+            double vo_last_t = -1;
             int vo_frames = 0, vo_ok = 0;
             double vo_ms_sum = 0, vo_speed_sum = 0;
             std::vector<uint8_t> seg_roles;
@@ -636,7 +637,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                      stats_render_sum / stats_frames);
                                 LOGI("SemSeg: %.1f Hz | NPU %.1f ms", g_semseg.hz(), g_semseg.npuMs());
                                 if (vo_frames)
-                                    LOGI("VO: ok %d/%d | speed avg %.2f m/s | %.1f ms (incl. depth registration) | inliers %d/%d tracked %d",
+                                    LOGI("VO: %d results/s, ok %d | speed avg %.2f m/s | %.1f ms on its thread (incl. depth registration) | inliers %d/%d tracked %d",
                                          vo_ok, vo_frames, vo_speed_sum / vo_frames, vo_ms_sum / vo_frames,
                                          vo_res.inliers, vo_res.withDepth, vo_res.tracked);
                                 vo_frames = vo_ok = 0;
@@ -658,34 +659,30 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                             depth_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - t_depth).count();
 
-                            // --- VISUAL ODOMETRY (CPU, while segmentation runs on the NPU) ---
-                            vo_res = VoResult{};
+                            // --- VISUAL ODOMETRY (own thread; newest result, <= ~2 frames old) ---
                             if (g_voEnabled && calib_ready && depth_frame) {
-                                static bool vo_cam_set = false;
-                                if (!vo_cam_set) {
-                                    g_vo.setCamera({color_intrin.fx, color_intrin.fy, color_intrin.ppx,
-                                                    color_intrin.ppy, color_intrin.width, color_intrin.height});
-                                    vo_cam_set = true;
+                                if (!g_vo.running()) {
+                                    DepthToColor dc{depth_intrin.fx, depth_intrin.fy, depth_intrin.ppx, depth_intrin.ppy,
+                                                    depth_intrin.width, depth_intrin.height,
+                                                    color_intrin.fx, color_intrin.fy, color_intrin.ppx, color_intrin.ppy,
+                                                    color_intrin.width, color_intrin.height, {}, {}};
+                                    for (int i = 0; i < 9; ++i) dc.rot[i] = depth_to_color.rotation[i];
+                                    for (int i = 0; i < 3; ++i) dc.trans[i] = depth_to_color.translation[i];
+                                    g_vo.start({color_intrin.fx, color_intrin.fy, color_intrin.ppx, color_intrin.ppy,
+                                                color_intrin.width, color_intrin.height}, dc);
                                 }
-                                DepthToColor dc{depth_intrin.fx, depth_intrin.fy, depth_intrin.ppx, depth_intrin.ppy,
-                                                depth_intrin.width, depth_intrin.height,
-                                                color_intrin.fx, color_intrin.fy, color_intrin.ppx, color_intrin.ppy,
-                                                color_intrin.width, color_intrin.height, {}, {}};
-                                for (int i = 0; i < 9; ++i) dc.rot[i] = depth_to_color.rotation[i];
-                                for (int i = 0; i < 3; ++i) dc.trans[i] = depth_to_color.translation[i];
-                                const auto t_vo = std::chrono::steady_clock::now();
-                                registerDepthHalf(static_cast<const uint16_t*>(depth_frame.get_data()),
-                                                  depth_frame.get_units(), dc, 2, depth_half);
-                                struct Ctx { const std::vector<float>* m; int w, h; } vctx{&depth_half,
-                                    color_intrin.width, color_intrin.height};
-                                vo_res = g_vo.process(
-                                    static_cast<const uint8_t*>(color_frame.get_data()), frame_timestamp_ms / 1000.0,
-                                    [](void* c, float u, float v) {
-                                        const Ctx* x = static_cast<const Ctx*>(c);
-                                        return depthHalfAt(*x->m, x->w, x->h, u, v);
-                                    }, &vctx);
-                                vo_res.ms = std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - t_vo).count();
+                                g_vo.submit(static_cast<const uint8_t*>(color_frame.get_data()),
+                                            static_cast<const uint16_t*>(depth_frame.get_data()),
+                                            depth_frame.get_units(), frame_timestamp_ms / 1000.0);
+                            }
+                            double vo_t = -1;
+                            const double prev_vo_t = vo_last_t;
+                            if (!g_vo.latest(vo_res, vo_R, vo_T, vo_t) ||
+                                frame_timestamp_ms / 1000.0 - vo_t > 0.2) {
+                                vo_res = VoResult{};   // missing or stale: no ego-motion
+                            }
+                            if (vo_t != prev_vo_t && vo_t > 0) {   // count each new result once
+                                vo_last_t = vo_t;
                                 vo_frames++;
                                 vo_ok += vo_res.ok;
                                 vo_ms_sum += vo_res.ms;
@@ -697,7 +694,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 g_tracker.setIntrinsics(color_intrin.fx, color_intrin.ppx,
                                                         color_intrin.fy, color_intrin.ppy);
                             }
-                            g_tracker.setEgo(vo_res.ok, g_vo.poseR(), g_vo.poseT(), vo_res.vel);
+                            g_tracker.setEgo(vo_res.ok, vo_R, vo_T, vo_res.vel);
                             g_tracker.update(detections, frame_timestamp_ms / 1000.0, track_info);
                         }
 
@@ -864,7 +861,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_startPipeline(
                                 if (g_timingLogs) LOGI("VOF,%.2f,%d,%.2f,%.2f,%.2f,%.1f,%d,%.2f,%.2f,%.2f",
                                      frame_timestamp_ms / 1000.0, vo_res.ok ? 1 : 0, vo_res.vel[0], vo_res.vel[1],
                                      vo_res.vel[2], vo_res.angRate * 57.2958f, vo_res.inliers,
-                                     g_vo.poseT()[0], g_vo.poseT()[1], g_vo.poseT()[2]);
+                                     vo_T[0], vo_T[1], vo_T[2]);
 
                                 // E2E,frame,capture->arrive,infer,render,arrive->post,capture->post,dets,depth
                                 double t_post_ms = e2e_now_ms();
@@ -929,6 +926,7 @@ Java_com_hsv2_hsv2_1lite_MainActivity_stopPipeline(
 
     g_imuPending = false;
     g_imu.stop();
+    g_vo.stop();
     
     if (rs_pipe) {
         try {

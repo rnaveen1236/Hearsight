@@ -1,8 +1,11 @@
 #ifndef HSV2_VO_H
 #define HSV2_VO_H
 
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <random>
+#include <thread>
 #include <vector>
 
 /*
@@ -93,6 +96,38 @@ private:
     float vel_[3]{0, 0, 0};
     float angRate_{0};
     std::mt19937 rng_{42};
+};
+
+// Runs VisualOdometry on its own thread (latest frame only), so the camera
+// loop is not slowed down. The loop submits each frame's colour + depth and
+// reads the newest result (at most a frame or two old).
+class VoThread {
+public:
+    ~VoThread() { stop(); }
+    void start(const VoCamera& cam, const DepthToColor& reg);
+    void stop();
+    bool running() const { return running_; }
+    // Copies the frame; dropped if the worker is still busy.
+    void submit(const uint8_t* rgba, const uint16_t* depth, float depthUnits, double tSec);
+    // Newest result and the pose at that frame. False if none yet.
+    bool latest(VoResult& r, float R[9], float t[3], double& tSec) const;
+    void reset();
+
+private:
+    void loop();
+    VisualOdometry vo_;
+    DepthToColor reg_{};
+    std::thread thread_;
+    mutable std::mutex m_;
+    std::condition_variable cv_;
+    bool running_{false}, quit_{false}, pending_{false}, busy_{false}, resetReq_{false};
+    std::vector<uint8_t> rgba_;
+    std::vector<uint16_t> depth_;
+    float units_{0.001f};
+    double t_{0};
+    VoResult res_;
+    float R_[9]{1, 0, 0, 0, 1, 0, 0, 0, 1}, T_[3]{0, 0, 0};
+    double resT_{-1};
 };
 
 #endif  // HSV2_VO_H
